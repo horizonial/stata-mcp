@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# 运行时产物
+_mcp_graphs/
+*.png
+*.svg
+*.gph
+.statemcp/
+.statamcp/
+
+# 临时
+*.log
+spikes/__pycache__/
