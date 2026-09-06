@@ -449,3 +449,19 @@ codex 第四轮审出 4 项，全修：
 4. **单例懒初始化竞态**：get_manager()/get_runner() 加模块级初始化锁；并发测试（50 线程）必须返回同一实例。
 
 **原则收尾（认可审计者判断）**：DNS rebinding / redirect 属连接层边界，静态 guard 只当前置过滤；真正不可信场景应改为主进程安全下载/代理，不再靠静态 Stata 文本解析补洞。test count 133→138→150。
+
+## 27f. P16f 第五轮（2026-09-03，150→157 测试）——诚实定性 restricted
+
+第五轮审出 5 个绕过，暴露本质：**任何"解析任意 Stata 代码"的静态防线都封不完**。
+修复 + 定性调整：
+1. P0 `frame name: cmd` 前缀 / P0 `table, command(...)` 嵌套任意命令 → 从白名单**移除 frame、table**（命令位即拦）。
+2. P1 `describe/des using "..."` 读外部文件 → describe/des 纳入路径审计（using 后路径送 DataPathAuditor）。
+3. P1 `lab save` 别名绕过 → `lab` 移出白名单（连同 label 的 lab 别名不再放行写盘路径）。
+4. P1 `import fred/haver`（网络）→ 从 _FILE_KINDS 移除 fred/haver（不再当本地文件命令）。
+
+**定性（关键）**：restricted 从"fail-closed 防线"降级为"注入拦截器，非沙箱"——README/DESIGN/模块 docstring
+全部改口径：对真正不可信内容，正确做法是**不提供自由 code 执行**（只用白名单结构化工具）；restricted
+仅适用"代码基本可信、防常见注入"的纵深。不再对简历宣称"完整沙箱"。
+
+**简历口径（按审计者建议采用）**：可写"构建了多会话、异步任务、结构化错误/溯源、DNS-aware SSRF guard 的
+Windows Stata MCP"；restricted 描述为纵深拦截器而非完整沙箱。

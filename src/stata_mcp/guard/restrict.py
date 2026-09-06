@@ -1,21 +1,23 @@
-"""受限模式（P12 + P16b 补强）：拦截 shell 逃逸、文件删除、外部代码、越权文件路径。
+"""受限模式（P12–P16f）：白名单命令 + 路径审计的注入拦截器。**不是沙箱。**
 
 为什么需要它：``stata_run`` 能执行任意 Stata 命令，若 agent 被 prompt 注入，可用
 ``shell``/``erase``/``use "C:\\敏感"`` 逃逸到文件系统。受限模式给 ``stata_run``
-一个可选安全边界。
+一道"挡住常见注入路径"的纵深防线。
 
-**边界声明（重要）**：受限模式是**静态尽力而为 + fail-closed** 的防线，不是完备的
-沙箱。它无法对抗全部 Stata 语法（宏求值、间接命令等）。对真正不可信的代码，正确
-姿势是"根本不放行"，受限模式只挡常见注入路径。P16b 已补强：续行合并、``using``
-关键字、saveold/export/copy/do/run/include、宏/复合引号 fail-closed、URL 拒绝。
+**重要边界声明（P16f，诚实的定性）**：受限模式**不能声称是 fail-closed 沙箱**。
+Stata 语法面极广（宏求值、``frame name: cmd`` 前缀、``table, command()`` 嵌套、
+别名 lab/label、``#delimit``、大括号块…），静态文本解析封不完——任何基于
+"解析任意 Stata 代码"的防线都有暗角（P0-P16f 已多次证明）。**对真正不可信的内容，
+正确姿势是根本不提供自由 code 执行**（只用白名单结构化工具）；restricted 只用于
+"代码基本可信、仅需防常见注入"的纵深。可复现的已知非沙箱入口见 tests + DESIGN。
 
-拦截清单：
-- 危险词（整句词边界）：shell / winexec / erase / rm（OS 逃逸与删除）
-- 命令位 do / run / include（执行外部代码 = 逃逸通道）
-- 行首 ``!`` shell 转义
-- 路径命令读写授权目录外（含 copy 源与目的、export 目标）
-- 含宏 ``$`` / 复合引号反引号 的路径（fail-closed）
-- URL（``://``）——受限模式不允许网络访问
+当前拦截：
+- 命令白名单（不在 _ALLOWED_VERBS 一律拒）；frame/table/import-fred-haver 等含
+  嵌套命令/网络能力的命令从白名单移除；
+- 危险词 shell/winexec/erase/rm、命令位 do/run/include、行首 ``!``；
+- 路径命令读写授权目录外（use/append/merge/import/export/copy/saveold/describe-using 等）；
+- 白名单内子命令文件写入（estimates/est save·use、label save、table export/dofile）；
+- 含宏 ``$``/复合引号、URL 的网络访问一律拒。
 """
 from __future__ import annotations
 
@@ -39,6 +41,8 @@ _EXTERNAL_CMDS = {"do", "run", "include", "shell", "winexec", "erase", "rm"}
 _FILE_COMMANDS = {
     "use", "insheet", "infile", "append", "merge", "save", "saveold",
     "copy", "cd", "type", "log", "import", "export",
+    # describe/des ... using <file> 会读数据文件（P16f #3）
+    "describe", "des",
 }
 
 # 命令白名单（P16c #2 fail-closed）：不在白名单的命令一律拒绝。
@@ -48,14 +52,14 @@ _FILE_COMMANDS = {
 _ALLOWED_VERBS = {
     # 输出/环境
     "display", "di", "set", "macro", "scalar", "matrix", "return",
-    "ereturn", "assert", "preserve", "restore", "frame", "clear",
+    "ereturn", "assert", "preserve", "restore", "clear",
     # 数据处理
     "gen", "generate", "g", "egen", "replace", "drop", "keep", "sort",
-    "order", "rename", "label", "lab", "encode", "decode", "destring",
+    "order", "rename", "label", "encode", "decode", "destring",
     "tostring", "recode", "tempvar", "tempfile", "capture", "by", "bysort",
     # 统计
     "summarize", "sum", "su", "describe", "des", "list", "li", "count",
-    "codebook", "tabulate", "tab", "table", "quietly", "qui", "noisily",
+    "codebook", "tabulate", "tab", "quietly", "qui", "noisily",
     "regress", "reg", "logit", "probit", "oprobit", "ologit", "mlogit",
     "poisson", "nbreg", "xtset", "xtreg", "xtdescribe", "xtsum", "areg",
     "ivregress", "tobit", "heckman", "test", "testparm", "lincom", "estimates",
@@ -64,8 +68,8 @@ _ALLOWED_VERBS = {
 } | _FILE_COMMANDS
 # import/export 的已知子命令（文件格式），其他 import(如 import idcode)不管
 _FILE_KINDS = {
-    "delimited", "excel", "spss", "sasxport", "sav", "dbase", "haver",
-    "infix", "infile", "fixed", "fred", "hdf5", "graph", "icd9",
+    "delimited", "excel", "spss", "sasxport", "sav", "dbase",
+    "infix", "infile", "fixed", "hdf5", "icd9",
     "icd10", "sas", "strata", "replace", "xlsx", "psytab",
 }
 # 不是路径参数的常见关键字（跳过，避免误当路径）

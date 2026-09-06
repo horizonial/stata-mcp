@@ -226,6 +226,52 @@ class RestrictDeepBypassTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class P16fNestedBypassTests(unittest.TestCase):
+    """P16f：frame 前缀/table command()/describe using/lab 别名/网络 import 全要拦。"""
+
+    def _aud(self):
+        return DataPathAuditor(allowed_dirs=[os.getcwd()])
+
+    def test_frame_prefix_blocked(self):
+        for stmt in [
+            'frame default: do "C:/evil.do"',
+            "frame default: python: pass",
+            'frame default: use "C:/outside.dta"',
+            'frame default: save "C:/outside.dta"',
+        ]:
+            self.assertFalse(restrict(stmt, self._aud())[0], stmt)
+
+    def test_table_command_option_blocked(self):
+        for stmt in [
+            'table foreign, command(do "C:/evil.do")',
+            "table foreign, command(shell echo x)",
+            'table foreign, command(use "C:/outside.dta")',
+        ]:
+            self.assertFalse(restrict(stmt, self._aud())[0], stmt)
+
+    def test_describe_using_outside_blocked(self):
+        outside = os.path.join(tempfile.gettempdir(), "evil.dta")
+        self.assertFalse(restrict(f'describe using "{outside}"', self._aud())[0])
+        self.assertFalse(restrict(f'des using "{outside}"', self._aud())[0])
+
+    def test_lab_save_alias_blocked(self):
+        self.assertFalse(
+            restrict('lab save mylbl using "C:/outside.do"', self._aud())[0]
+        )
+
+    def test_network_import_blocked(self):
+        self.assertFalse(restrict("import fred GDP", self._aud())[0])
+        self.assertFalse(restrict("import haver E@CAPSTOCK", self._aud())[0])
+
+    def test_describe_memory_still_allowed(self):
+        ok, _ = restrict("describe mpg weight", self._aud())
+        self.assertTrue(ok)
+
+    def test_import_excel_local_still_allowed(self):
+        ok, _ = restrict('import excel "data.xlsx", firstrow clear', self._aud())
+        self.assertTrue(ok)
+
+
 class TaskStatusSessionTests(unittest.TestCase):
     """P16e #2：task_status 是全局 job 查询，schema 不含 session_id。"""
 

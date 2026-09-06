@@ -64,7 +64,7 @@ session.py       Session（懒启动 worker 代理）+ SessionManager（上限/�
 stata/worker.py  worker 子进程（引擎 + 执行 + 结构化 + 独立 break 线程 + 孤儿看门狗）
 stata/pystata_backend.py   stdout 交换捕获 + 全局 scalar rc + StataSO_SetBreak 中断
 results/         ResultParser + 通用系数提取 + 会话快照（sfi 直读 + Mata 算统计量）
-guard/           L1 变量名白名单 + L3 数据路径审计 + 受限模式（防 shell/erase/越权路径）
+guard/           L1 变量名白名单 + L3 数据路径审计 + 受限模式（白名单命令注入拦截器，**非沙箱**——见下）
 output/          SMCL 清理 / 编码 / 错误分类 / 截断 / 隐私哈希
 platform/job.py  Windows Job Object（父死子亡，防 license 泄漏）
 tools/           10 个工具，@register 注册
@@ -85,6 +85,11 @@ python -m unittest tests.test_real_stata -v     # 4 用例（需本机 Stata，�
 
 - `background` 执行期间 `sys.stdout` 被捕获（pystata 捕获是进程级）；MCP 通信实测不受影响。
 - 会话状态在内存（worker 崩溃自动 reset + 附重放日志）；跨服务器重启的持久化归上层台账。
+- **restricted（受限模式）不是安全沙箱**：它是"白名单命令 + 路径审计"的注入拦截器，挡常见注入
+  （shell/erase/外部 do/越权读写/网络），但 Stata 语法面（frame 前缀、command() 嵌套、宏求值等）
+  静态解析封不完。对**真正不可信的内容**，正确做法是不提供自由 code 执行（只用白名单结构化工具）；
+  restricted 仅适用于"代码基本可信、防常见注入"的纵深。
+- URL 守卫的 DNS rebinding/redirect 完整防御需连接层二次校验（当前为前置字符串 + DNS 解析过滤）。
 
 ## License
 
