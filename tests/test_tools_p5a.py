@@ -192,6 +192,23 @@ class LoadDataTests(unittest.TestCase):
             backend2.calls[0], 'import delimited "https://example.com/x.csv?raw=1", clear'
         )
 
+    def test_clear_string_false_not_truthy(self) -> None:
+        # P16b #4：clear="false"（字符串）不得触发 `, clear` 覆盖数据
+        d = _in_cwd_dir()
+        self.addCleanup(os.rmdir, d)
+        src = os.path.join(d, "auto.dta")
+        backend = RecordingBackend(rc=0)
+        stata_load_data({"source": src, "clear": "false"}, _ctx(backend))
+        self.assertEqual(backend.calls[0].count(", clear"), 0)
+
+    def test_clear_string_true_works(self) -> None:
+        d = _in_cwd_dir()
+        self.addCleanup(os.rmdir, d)
+        src = os.path.join(d, "auto.dta")
+        backend = RecordingBackend(rc=0)
+        stata_load_data({"source": src, "clear": "true"}, _ctx(backend))
+        self.assertTrue(backend.calls[0].endswith(", clear"))
+
     def test_rc_nonzero_no_shape_read_and_error_class(self) -> None:
         d = _in_cwd_dir()
         self.addCleanup(os.rmdir, d)

@@ -20,7 +20,7 @@ from ..envelope import Envelope
 from ..guard.validate import validate_varname
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend
+from .run import _resolve_backend, _session_arg
 
 _ACTIONS = ("describe", "summarize", "codebook")
 
@@ -140,7 +140,7 @@ def stata_inspect_data(arguments: dict, ctx=None) -> Envelope:
         )
 
     command = _build_command(action, varlist)
-    session = _resolve_backend(ctx)
+    session = _resolve_backend(ctx, _session_arg(args))
     t0 = time.perf_counter()
     result = session.execute(command)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

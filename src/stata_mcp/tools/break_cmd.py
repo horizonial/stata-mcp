@@ -7,19 +7,25 @@ from __future__ import annotations
 
 from ..envelope import Envelope
 from . import register
-from .run import _resolve_backend
+from .run import _resolve_backend, _session_arg
 
 _STATA_BREAK_SCHEMA: dict = {
     "type": "object",
-    "properties": {},
+    "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "要打断的会话标识；省略用 'default'。",
+        }
+    },
     "required": [],
 }
 
 
 @register("stata_break", _STATA_BREAK_SCHEMA)
 def stata_break(arguments: dict, ctx=None) -> Envelope:
-    """打断当前正在运行的 Stata 命令（若有）；打断后命令 rc=1，引擎存活可继续。"""
-    backend = _resolve_backend(ctx)
+    """打断指定会话正在运行的 Stata 命令（若有）；打断后命令 rc=1，引擎存活可继续。"""
+    args = arguments if isinstance(arguments, dict) else {}
+    backend = _resolve_backend(ctx, _session_arg(args))
     backend.interrupt()
     return Envelope(
         text="break signal sent; any running command will stop with rc=1",

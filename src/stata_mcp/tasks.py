@@ -25,26 +25,35 @@ ERROR = "error"
 
 
 class TaskRunner:
-    """后台任务表：job_id -> 状态/结果。P10 起用 Session（worker 子进程）。"""
+    """后台任务表：job_id -> 状态/结果。P10 起用 Session（worker 子进程）。
+
+    P16b #1：后台任务按 session_id 路由（不再固定 default）。
+    """
 
     def __init__(self, session=None) -> None:
         self._session = session if session is not None else get_manager().get_or_create("default")
         self._tasks: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def submit(self, code: str) -> str:
-        """提交一段代码后台执行，立即返回 job_id。"""
+    def submit(self, code: str, session_id: str | None = None) -> str:
+        """提交一段代码后台执行，立即返回 job_id。session_id 指定会话（默认 default）。"""
+        session = self._session
+        if session_id is not None:
+            session = get_manager().get_or_create(session_id)
         job_id = uuid.uuid4().hex[:12]
         with self._lock:
-            self._tasks[job_id] = {"status": RUNNING, "result": None, "code": code}
+            self._tasks[job_id] = {
+                "status": RUNNING, "result": None, "code": code, "session": session,
+            }
         threading.Thread(
             target=self._run, args=(job_id, code), daemon=True
         ).start()
         return job_id
 
     def _run(self, job_id: str, code: str) -> None:
+        session = self._tasks.get(job_id, {}).get("session", self._session)
         try:
-            result = self._session.execute(code)
+            result = session.execute(code)
             with self._lock:
                 self._tasks[job_id] = {"status": DONE, "result": result, "code": code}
         except Exception as exc:  # 引擎层异常（极少数逃过 capture 的）

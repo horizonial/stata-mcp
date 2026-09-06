@@ -23,7 +23,7 @@ from ..envelope import Envelope
 from ..guard.data_path import DataPathAuditor
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend
+from .run import _resolve_backend, _session_arg
 
 # 模块级配置缓存：分层配置是进程内静态的，读一次即可（load_config 每次读盘+合并，
 # 多工具共享时不值得每个工具调用都重读）。需要时测试可把本变量置回 None 重新加载。
@@ -122,7 +122,10 @@ def stata_load_data(arguments: dict, ctx=None) -> Envelope:
     或 https URL。返回载入命令的清洗输出与 {source, N, k} 结构化形状。"""
     args = arguments if isinstance(arguments, dict) else {}
     source = args.get("source", "")
-    clear = bool(args.get("clear", False))
+    # P16b #4：clear 严格 bool（字符串 "false" 不得当 True——否则可能覆盖未保存数据）
+    from .run import _as_bool
+
+    clear = _as_bool(args.get("clear"), False)
     meta = {"tool": "stata_load_data"}
 
     if not isinstance(source, str) or not source.strip():
@@ -180,7 +183,7 @@ def stata_load_data(arguments: dict, ctx=None) -> Envelope:
         cmd_source = os.path.abspath(source)
 
     command = _build_load_command(cmd_source, clear)
-    session = _resolve_backend(ctx)
+    session = _resolve_backend(ctx, _session_arg(args))
     t0 = time.perf_counter()
     result = session.execute(command)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

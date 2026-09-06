@@ -24,7 +24,10 @@ _BREAK_GRACE = 3.0
 _DEFAULT_IDLE_TIMEOUT = 600.0
 # 启动握手超时（P16 #3）：worker 点火 + 引擎 init/license 的等待上限。
 # 超过即判"启动失败"，快速返回，不干等 _DEFAULT_EXEC_TIMEOUT。
-_START_TIMEOUT = 60.0
+# P16b：60→20s 更贴近 fail-fast（引擎冷启动 + license 网络认证一般 <10s）。
+_START_TIMEOUT = 20.0
+# 只读操作（snapshot/preview）超时：不跑命令，理应很快，别给 300s。
+_READ_TIMEOUT = 60.0
 
 
 @dataclass
@@ -42,6 +45,10 @@ class SessionResult:
     data_load_cmd: str | None = None  # 载入数据命令（do-file 往返前缀，P0-4）
     exec_seq: int | None = None  # 会话内执行序号（结果版本化，P0-4）
     replay: list[dict] | None = None  # 崩溃重置时返回的命令日志（供 agent 重放，P15）
+
+
+class _WorkerDead(RuntimeError):
+    """worker 进程死亡（C 崩溃 / 被 kill）。用于 fail-fast（P16b）。"""
 
 
 class _SessionDead(RuntimeError):
@@ -169,13 +176,26 @@ class Session:
             self._request_q.put({"id": mid, "type": "execute", "code": code})
             interrupted = False
             try:
-                resp = self._response_q.get(timeout=timeout)
+                resp = self._recv(timeout)
+            except _WorkerDead:
+                # worker 在执行中崩溃（C 引擎 crash 等）→ fail-fast（P16b）
+                self._cleanup()
+                return self._make_reset(
+                    f"(session crashed while running command: {code[:120]}; session reset)",
+                    "crashed",
+                )
             except queue.Empty:
                 # 超时：先 break 保状态
                 self._request_break()
                 try:
-                    resp = self._response_q.get(timeout=_BREAK_GRACE)
+                    resp = self._recv(_BREAK_GRACE)
                     interrupted = True  # break 生效，命令被超时打断（保状态）
+                except _WorkerDead:
+                    self._cleanup()
+                    return self._make_reset(
+                        f"(session crashed while running command: {code[:120]}; session reset)",
+                        "crashed",
+                    )
                 except queue.Empty:
                     # break 后仍卡死：杀 worker，返回 reset + 历史日志（供重放）
                     self._cleanup()
@@ -184,13 +204,6 @@ class Session:
                         f"session reset; command: {code[:120]})",
                         "timeout",
                     )
-            except (EOFError, OSError, ValueError):
-                # worker 在执行中崩溃（C 引擎 crash 等）→ reset + 历史日志
-                self._cleanup()
-                return self._make_reset(
-                    f"(session crashed while running command: {code[:120]}; session reset)",
-                    "crashed",
-                )
 
             if resp.get("id") != mid:
                 return self._make_reset("(session response mismatch; reset)", "crashed")
@@ -200,7 +213,7 @@ class Session:
 
             # reset=True 表示本次是"重建后的新 worker"执行的：之前 worker 上跑的
             # 命令效果全丢，附上完整日志供 agent 重放恢复（P15）。
-            replay = self.journal() if reset else None
+            replay = self._journal_snapshot() if reset else None
             return SessionResult(
                 text=resp.get("text", ""),
                 rc=rc,
@@ -216,10 +229,35 @@ class Session:
             )
 
     def _make_reset(self, text: str, kind: str) -> SessionResult:
-        """reset 结果：附带崩溃前命令日志（replay 原料，供 agent 重放恢复状态）。"""
+        """reset 结果：附带崩溃前命令日志（replay 原料，供 agent 重放恢复状态）。
+
+        在 execute 锁内调用，用 _journal_snapshot 而非 journal()（后者会二次加锁死锁）。
+        """
         return SessionResult(
-            text=text, rc=601, reset=True, error_kind=kind, replay=self.journal()
+            text=text, rc=601, reset=True, error_kind=kind,
+            replay=self._journal_snapshot(),
         )
+
+    def _recv(self, overall: float) -> dict:
+        """等一条 response；worker 死亡立即抛 _WorkerDead（fail-fast，P16b）。
+
+        为什么必须轮询 is_alive：multiprocessing Queue 父进程也持有写端，
+        worker 被强杀（C 崩溃）时另一端关闭不会触发 EOF → 裸 get 会阻塞到
+        超时。轮询进程存活可让"运行中崩溃"快速返回，而非干等 300s。
+        """
+        deadline = time.time() + overall
+        while True:
+            if self._proc is not None and not self._proc.is_alive():
+                raise _WorkerDead()
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise queue.Empty
+            try:
+                return self._response_q.get(timeout=min(0.5, remaining))
+            except queue.Empty:
+                continue
+            except (EOFError, OSError, ValueError):
+                raise _WorkerDead()
 
     def _await_ready(self) -> bool:
         """启动握手（P16 #3）：等 worker 发 ready；短超时 _START_TIMEOUT。
@@ -230,11 +268,8 @@ class Session:
         if self._ready_ok:
             return True
         try:
-            msg = self._response_q.get(timeout=_START_TIMEOUT)
-        except queue.Empty:
-            self._cleanup()
-            return False
-        except (EOFError, OSError, ValueError):
+            msg = self._recv(_START_TIMEOUT)
+        except (_WorkerDead, queue.Empty):
             self._cleanup()
             return False
         if msg and msg.get("type") == "ready":
@@ -249,10 +284,15 @@ class Session:
         if len(self._journal) > self._journal_max:
             self._journal.pop(0)
 
+    def _journal_snapshot(self) -> list[dict]:
+        """日志副本（**调用方须已持有 self._lock**）。execute/_make_reset 在锁内用，
+        避免死锁（P16b：journal() 公共方法加锁，不能再在锁内调它）。"""
+        return [dict(e) for e in self._journal]
+
     def journal(self) -> list[dict]:
         """当前会话命令日志副本（seq/cmd/rc）。worker 崩溃、会话重置后仍保留。"""
         with self._lock:
-            return [dict(e) for e in self._journal]
+            return self._journal_snapshot()
 
     def clear_journal(self) -> None:
         with self._lock:
@@ -274,10 +314,10 @@ class Session:
             mid = self._msg_id
             self._request_q.put({"id": mid, "type": "rows", "n": int(n)})
             try:
-                resp = self._response_q.get(timeout=_DEFAULT_EXEC_TIMEOUT)
-            except (queue.Empty, EOFError, OSError, ValueError):
+                resp = self._recv(_READ_TIMEOUT)
+            except (_WorkerDead, queue.Empty):
                 self._cleanup()
-                return {}
+                return {"reset": True}
             return resp
 
     def _request_break(self) -> None:
@@ -297,11 +337,8 @@ class Session:
             mid = self._msg_id
             self._request_q.put({"id": mid, "type": "snapshot"})
             try:
-                resp = self._response_q.get(timeout=_DEFAULT_EXEC_TIMEOUT)
-            except queue.Empty:
-                self._cleanup()
-                return {"reset": True}
-            except (EOFError, OSError, ValueError):
+                resp = self._recv(_READ_TIMEOUT)
+            except (_WorkerDead, queue.Empty):
                 self._cleanup()
                 return {"reset": True}
             if reset:

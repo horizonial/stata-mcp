@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..envelope import Envelope
 from . import register
-from .run import _resolve_backend
+from .run import _resolve_backend, _session_arg
 
 _STATA_DATA_ROWS_SCHEMA: dict = {
     "type": "object",
@@ -39,7 +39,7 @@ def stata_data_rows(arguments: dict, ctx=None) -> Envelope:
         )
     n = max(1, min(int(n), 50))
 
-    session = _resolve_backend(ctx)
+    session = _resolve_backend(ctx, _session_arg(args))
     preview = session.preview(n)
     if not preview or "variables" not in preview:
         return Envelope(

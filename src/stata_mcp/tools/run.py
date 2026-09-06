@@ -18,6 +18,24 @@ from . import register
 # session_id 白名单（P16 #2）：只允许简单标识符，防任意字符串创建会话/耗尽 license
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+
+def _as_bool(raw, default: bool = False) -> bool:
+    """严格 bool 解析（P16b #4）：字符串 "false" 不得当 True。
+
+    - None → default；
+    - 真 bool → 原样；
+    - 字符串 → 仅显式 'true'/'1'/'yes'/'on'（大小写不敏感）→ True，否则 False；
+      这样 `background="false"`、`clear="false"` 都不会误伤。
+    - 其它类型 → default（不信任）。
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("true", "1", "yes", "on")
+    return default
+
 # MCP tool 入参 schema：本阶段只有一段 code 字符串
 _STATA_RUN_SCHEMA: dict = {
     "type": "object",
@@ -68,6 +86,15 @@ def _resolve_session(ctx, session_id: str | None = None):
     return get_manager().get_or_create("default")
 
 
+def _resolve_backend(ctx, session_id: str | None = None):
+    """工具通用会话解析：支持显式 session_id（P16b #1 端到端贯穿）。
+
+    各工具 schema 提供可选 ``session_id`` 后，把参数传到这里即可路由到指定会话，
+    不再固定 default。非法 session_id 回退 ctx 默认（白名单见 _normalize_session_id）。
+    """
+    return _resolve_session(ctx, _normalize_session_id(session_id))
+
+
 def _normalize_session_id(raw) -> str | None:
     """校验 session_id；非法返回 None（调用方回退 default）。"""
     if not isinstance(raw, str) or not raw.strip():
@@ -76,8 +103,11 @@ def _normalize_session_id(raw) -> str | None:
     return raw if _SESSION_ID_RE.match(raw) else None
 
 
-# 向后兼容别名：其他工具仍 import _resolve_backend，但返回的是 Session。
-_resolve_backend = _resolve_session
+def _session_arg(args) -> str | None:
+    """从工具入参 dict 取校验过的 session_id（P16b #1）；无/非法返回 None。"""
+    if not isinstance(args, dict):
+        return None
+    return _normalize_session_id(args.get("session_id"))
 
 
 def enrich_structured(structured, code: str, result) -> dict:
@@ -109,7 +139,7 @@ def _check_restricted(code: str, arguments: dict) -> Envelope | None:
     P16 修复：**在 background 分支之前执行**——否则后台任务可绕过 restricted
     提交 shell（审计发现 #1）。
     """
-    restricted = arguments.get("restricted", None)
+    restricted = _as_bool(arguments.get("restricted"), None)
     if restricted is None:
         from ..config import get_security, load_config
 
@@ -142,8 +172,9 @@ def _check_restricted(code: str, arguments: dict) -> Envelope | None:
 @register("stata_run", _STATA_RUN_SCHEMA)
 def stata_run(arguments: dict, ctx=None) -> Envelope:
     """执行一段 Stata 代码（保持会话状态），返回清洗后的输出文本与 rc。"""
-    code = arguments.get("code", "") if isinstance(arguments, dict) else ""
-    background = bool(arguments.get("background", False)) if isinstance(arguments, dict) else False
+    args = arguments if isinstance(arguments, dict) else {}
+    code = args.get("code", "")
+    background = _as_bool(args.get("background"), False)  # P16b #4：字符串 "false"→False
 
     if not isinstance(code, str) or not code.strip():
         return Envelope(
@@ -162,9 +193,11 @@ def stata_run(arguments: dict, ctx=None) -> Envelope:
 
     if background:
         # 后台执行：立即返回 job_id，命令在独立线程跑（仍受会话串行锁约束）。
+        # P16b #1：后台任务可指定 session_id（不固定 default）。
         from ..tasks import get_runner
 
-        job_id = get_runner().submit(code)
+        sid = _session_arg(args)  # background 用同批 args（session_id 已校验）
+        job_id = get_runner().submit(code, sid)
         return Envelope(
             text=f"submitted background job {job_id}; poll with stata_task_status, "
             "interrupt with stata_break",

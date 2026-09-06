@@ -131,6 +131,39 @@ class AuditRegressionTests(unittest.TestCase):
         self.assertIn("background", env.text)
 
 
+class BoolStrictTests(unittest.TestCase):
+    """P16b #4：bool 参数严格校验（字符串 'false' 不得当 True）。"""
+
+    def _as_bool(self, *a):
+        from stata_mcp.tools.run import _as_bool
+
+        return _as_bool(*a)
+
+    def test_false_strings_are_false(self):
+        self.assertFalse(self._as_bool("false"))
+        self.assertFalse(self._as_bool("False"))
+        self.assertFalse(self._as_bool("0"))
+        self.assertFalse(self._as_bool("no"))
+
+    def test_true_strings_are_true(self):
+        self.assertTrue(self._as_bool("true"))
+        self.assertTrue(self._as_bool("True"))
+        self.assertTrue(self._as_bool("1"))
+        self.assertTrue(self._as_bool("on"))
+
+    def test_real_bool_passthrough(self):
+        self.assertFalse(self._as_bool(False))
+        self.assertTrue(self._as_bool(True))
+
+    def test_non_bool_type_not_trusted(self):
+        self.assertFalse(self._as_bool(0))
+        self.assertFalse(self._as_bool(1))  # int 不当 bool
+
+    def test_none_uses_default(self):
+        self.assertTrue(self._as_bool(None, True))
+        self.assertFalse(self._as_bool(None, False))
+
+
 class SsrfAuditTests(unittest.TestCase):
     """审计#6：URL 守卫补 localhost/内网域名。"""
 

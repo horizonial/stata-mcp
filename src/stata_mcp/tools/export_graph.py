@@ -19,7 +19,7 @@ from ..envelope import Envelope
 from ..guard.validate import is_valid_identifier
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend
+from .run import _resolve_backend, _session_arg
 
 _FORMATS = ("png", "svg", "pdf")
 
@@ -96,7 +96,7 @@ def stata_export_graph(arguments: dict, ctx=None) -> Envelope:
     name_clause = f", name({name})" if name else ""
     command = f'graph export "{stata_path}"{name_clause} replace'
 
-    backend = _resolve_backend(ctx)
+    backend = _resolve_backend(ctx, _session_arg(args))
     result = backend.execute(command)
     text = strip_smcl(result.text)
 
