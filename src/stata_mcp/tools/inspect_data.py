@@ -20,7 +20,7 @@ from ..envelope import Envelope
 from ..guard.validate import validate_varname
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg
+from .run import _resolve_backend, _session_arg_loose
 
 _ACTIONS = ("describe", "summarize", "codebook")
 
@@ -41,7 +41,11 @@ _STATA_INSPECT_DATA_SCHEMA: dict = {
             "名字须为合法 Stata 变量名（字母/下划线开头，长度 1–32）。",
         },
     },
-    "required": [],
+            "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
+"required": [],
 }
 
 
@@ -140,7 +144,7 @@ def stata_inspect_data(arguments: dict, ctx=None) -> Envelope:
         )
 
     command = _build_command(action, varlist)
-    session = _resolve_backend(ctx, _session_arg(args))
+    session = _resolve_backend(ctx, _session_arg_loose(args))
     t0 = time.perf_counter()
     result = session.execute(command)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

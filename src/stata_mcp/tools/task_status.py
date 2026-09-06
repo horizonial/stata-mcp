@@ -14,7 +14,11 @@ _STATA_TASK_STATUS_SCHEMA: dict = {
             "description": "stata_run(background=True) 返回的 job_id。",
         }
     },
-    "required": ["job_id"],
+            "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
+"required": ["job_id"],
 }
 
 

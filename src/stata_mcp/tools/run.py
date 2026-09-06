@@ -69,10 +69,8 @@ _STATA_RUN_SCHEMA: dict = {
 def _resolve_session(ctx, session_id: str | None = None):
     """取执行会话：按 session_id 从 ctx.manager 路由（P16 #2 真多会话）。
 
-    优先：
-    1. 显式 session_id（经白名单）→ ctx.manager.get_or_create(session_id)；
-    2. ctx.session_id（make_context 默认 "default"）；
-    3. 兼容 ctx.backend（直接注入的 Session）。
+    ctx 已惰性化（P16c）：backend/session_id 可能为 None，只有显式 sid 或 default
+    才真正 get_or_create。
     """
     manager = getattr(ctx, "manager", None)
     if manager is not None:
@@ -87,27 +85,45 @@ def _resolve_session(ctx, session_id: str | None = None):
 
 
 def _resolve_backend(ctx, session_id: str | None = None):
-    """工具通用会话解析：支持显式 session_id（P16b #1 端到端贯穿）。
+    """工具通用会话解析：支持显式 session_id（P16b #1）。
 
-    各工具 schema 提供可选 ``session_id`` 后，把参数传到这里即可路由到指定会话，
-    不再固定 default。非法 session_id 回退 ctx 默认（白名单见 _normalize_session_id）。
+    session_id 调用方须已校验（_normalize_session_id），非法在此不再静默回退。
     """
-    return _resolve_session(ctx, _normalize_session_id(session_id))
+    return _resolve_session(ctx, session_id)
 
 
 def _normalize_session_id(raw) -> str | None:
-    """校验 session_id；非法返回 None（调用方回退 default）。"""
+    """校验 session_id；返回 None 表示"未提供或非法"（调用方须区分）。"""
     if not isinstance(raw, str) or not raw.strip():
         return None
-    raw = raw.strip()
-    return raw if _SESSION_ID_RE.match(raw) else None
+    return raw.strip() if _SESSION_ID_RE.match(raw.strip()) else None
 
 
-def _session_arg(args) -> str | None:
-    """从工具入参 dict 取校验过的 session_id（P16b #1）；无/非法返回 None。"""
+def _session_arg(args):
+    """从工具入参取 session_id → (sid, error)。error 非 None 表示"给了但非法"。
+
+    用于显式报错而非静默回退（P16c：非法 id 如 `../ideaA` 不应悄悄当 default）。
+    """
     if not isinstance(args, dict):
-        return None
-    return _normalize_session_id(args.get("session_id"))
+        return None, None
+    raw = args.get("session_id")
+    if raw is None:
+        return None, None
+    if not isinstance(raw, str) or not raw.strip():
+        return None, "session_id must be a non-empty string"
+    s = raw.strip()
+    if not _SESSION_ID_RE.match(s):
+        return None, f"invalid session_id {s!r} (allowed: [A-Za-z0-9_-], 1-64)"
+    return s, None
+
+
+def _session_arg_loose(args) -> str | None:
+    """宽松版：取校验过的 session_id；未提供/非法 → None（回退 default）。
+
+    供"路由到指定会话但非法时不阻塞"的次要工具使用（主工具 stata_run 用严格版）。
+    """
+    sid, _err = _session_arg(args)
+    return sid
 
 
 def enrich_structured(structured, code: str, result) -> dict:
@@ -139,14 +155,14 @@ def _check_restricted(code: str, arguments: dict) -> Envelope | None:
     P16 修复：**在 background 分支之前执行**——否则后台任务可绕过 restricted
     提交 shell（审计发现 #1）。
     """
-    restricted = _as_bool(arguments.get("restricted"), None)
-    if restricted is None:
-        from ..config import get_security, load_config
+    from ..config import get_security, load_config
 
-        restricted = bool(get_security(load_config(), "restricted_mode", False))
+    cfg_enforced = bool(get_security(load_config(), "restricted_mode", False))
+    # P16c：restricted 语义是"只增不减"——config 开了就不能被工具参数关掉。
+    # 工具传 restricted=true 是显式加强；传 false/"garbage" 均不能削弱 config。
+    restricted = cfg_enforced or _as_bool(arguments.get("restricted"), False)
     if not restricted:
         return None
-    from ..config import get_security, load_config
     from ..guard.data_path import DataPathAuditor
     from ..guard.restrict import restrict
 
@@ -191,12 +207,18 @@ def stata_run(arguments: dict, ctx=None) -> Envelope:
     if blocked is not None:
         return blocked
 
+    sid, sid_err = _session_arg(args)  # 先校验 session_id（P16c）
+    if sid_err:
+        return Envelope(
+            text=f"error: {sid_err}", structured=None, rc=1,
+            error_class=None, graphs=[], meta={"tool": "stata_run"},
+        )
+
     if background:
         # 后台执行：立即返回 job_id，命令在独立线程跑（仍受会话串行锁约束）。
         # P16b #1：后台任务可指定 session_id（不固定 default）。
         from ..tasks import get_runner
 
-        sid = _session_arg(args)  # background 用同批 args（session_id 已校验）
         job_id = get_runner().submit(code, sid)
         return Envelope(
             text=f"submitted background job {job_id}; poll with stata_task_status, "
@@ -208,12 +230,8 @@ def stata_run(arguments: dict, ctx=None) -> Envelope:
             meta={"tool": "stata_run", "job_id": job_id, "background": True},
         )
 
-    sid = _normalize_session_id(
-        arguments.get("session_id") if isinstance(arguments, dict) else None
-    )
-
     try:
-        session = _resolve_session(ctx, sid)
+        session = _resolve_session(ctx, sid)  # sid 来自上面 _session_arg（已校验）
     except Exception as exc:  # SessionLimitExceeded 等：友好返回而非裸异常
         return Envelope(
             text=f"error: {exc}",

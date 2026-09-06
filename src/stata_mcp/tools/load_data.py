@@ -23,7 +23,7 @@ from ..envelope import Envelope
 from ..guard.data_path import DataPathAuditor
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg
+from .run import _resolve_backend, _session_arg_loose
 
 # 模块级配置缓存：分层配置是进程内静态的，读一次即可（load_config 每次读盘+合并，
 # 多工具共享时不值得每个工具调用都重读）。需要时测试可把本变量置回 None 重新加载。
@@ -45,7 +45,11 @@ _STATA_LOAD_DATA_SCHEMA: dict = {
             "default": False,
         },
     },
-    "required": ["source"],
+            "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
+"required": ["source"],
 }
 
 
@@ -183,7 +187,7 @@ def stata_load_data(arguments: dict, ctx=None) -> Envelope:
         cmd_source = os.path.abspath(source)
 
     command = _build_load_command(cmd_source, clear)
-    session = _resolve_backend(ctx, _session_arg(args))
+    session = _resolve_backend(ctx, _session_arg_loose(args))
     t0 = time.perf_counter()
     result = session.execute(command)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

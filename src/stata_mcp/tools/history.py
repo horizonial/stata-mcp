@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from ..envelope import Envelope
 from . import register
-from .run import _resolve_backend, _session_arg
+from .run import _resolve_backend, _session_arg_loose
 
 _STATA_SESSION_HISTORY_SCHEMA: dict = {
     "type": "object",
@@ -19,7 +19,11 @@ _STATA_SESSION_HISTORY_SCHEMA: dict = {
             "maximum": 100,
         }
     },
-    "required": [],
+            "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
+"required": [],
 }
 
 
@@ -30,7 +34,7 @@ def stata_session_history(arguments: dict, ctx=None) -> Envelope:
     last = args.get("last", None)
     meta = {"tool": "stata_session_history"}
 
-    session = _resolve_backend(ctx, _session_arg(args))
+    session = _resolve_backend(ctx, _session_arg_loose(args))
     journal = session.journal()
     if isinstance(last, int) and not isinstance(last, bool) and last > 0:
         journal = journal[-last:]

@@ -29,19 +29,16 @@ def make_context() -> SimpleNamespace:
     P0-3：从 config[security].max_sessions 应用会话上限（每个会话 = 一个 license
     席位），应用一次即可（manager 是进程内单例）。
 
-    P16 #2：ctx 注入 manager + session_id，工具层可真正按 session_id 路由多会话
-    （此前只有 default，session_id 参数是死壳）。
+    P16 #2/P16c：ctx 注入 manager，**惰性**——不再每次调用预建 default（否则
+    max_sessions=1 时任何显式 ideaA 都被占位的 default 挡掉）。会话在真正用时
+    才 get_or_create（首次 execute/snapshot 才点火占 license）。
     """
     from .config import get_security, load_config
     from .session import get_manager
 
     manager = get_manager()
     _apply_max_sessions(manager)
-    return SimpleNamespace(
-        manager=manager,
-        session_id="default",
-        backend=manager.get_or_create("default"),
-    )
+    return SimpleNamespace(manager=manager, session_id=None, backend=None)
 
 
 _max_sessions_applied = False
