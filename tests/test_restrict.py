@@ -78,7 +78,8 @@ class FilePathTests(unittest.TestCase):
 
 class RestrictTests(unittest.TestCase):
     def test_restrict_combines_both(self):
-        ok, _ = restrict('use "data.dta"\nregress mpg weight', _auditor())
+        # P16g：use 已移出白名单（数据加载走工具）；用内存数据分析做正向
+        ok, _ = restrict('gen z = 1\nregress mpg weight', _auditor())
         self.assertTrue(ok)
 
     def test_restrict_blocks_shell(self):
@@ -224,6 +225,34 @@ class RestrictDeepBypassTests(unittest.TestCase):
     def test_legit_append_in_cwd_allowed(self):
         ok, _ = restrict('append using "auto.dta"', self._aud())
         self.assertTrue(ok)
+
+
+class P16gVarlistUsingTests(unittest.TestCase):
+    """P16g #1：varlist-using 不把 varlist 当路径；use/infile/insheet 从白名单移除。"""
+
+    def _aud(self):
+        return DataPathAuditor(allowed_dirs=[os.getcwd()])
+
+    def test_use_varlist_using_outside_blocked(self):
+        # use 本身已移出白名单 → 任何 use 都拦（含 varlist-using）
+        self.assertFalse(restrict('use mpg using "C:/outside.dta"', self._aud())[0])
+        self.assertFalse(restrict('use "C:/outside.dta"', self._aud())[0])
+
+    def test_infile_insheet_blocked(self):
+        self.assertFalse(restrict('infile x using "C:/outside.raw"', self._aud())[0])
+        self.assertFalse(restrict('infile using "C:/outside.dct", using("C:/outside.raw")', self._aud())[0])
+        self.assertFalse(restrict('insheet using "C:/outside.csv"', self._aud())[0])
+
+    def test_describe_varlist_using_outside_blocked(self):
+        self.assertFalse(restrict('describe mpg using "C:/outside.dta"', self._aud())[0])
+        self.assertFalse(restrict('des mpg using "C:/outside.dta"', self._aud())[0])
+
+    def test_describe_varlist_memory_allowed(self):
+        ok, _ = restrict("describe mpg weight", self._aud())
+        self.assertTrue(ok)
+
+    def test_import_excel_bare_outside_blocked(self):
+        self.assertFalse(restrict("import excel C:\\outside.xlsx", self._aud())[0])
 
 
 class P16fNestedBypassTests(unittest.TestCase):
@@ -456,9 +485,9 @@ class WhitelistFailClosedTests(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_legit_analysis_allowed(self):
-        # 本地数据分析：读目录内数据 + gen + xtreg 都应在白名单放行
+        # 内存数据分析：gen + xtreg 应在白名单放行（P16g 起 use 走 stata_load_data 工具）
         ok, _ = restrict(
-            'use "auto.dta"\ngen w2 = weight^2\nxtreg mpg weight w2, fe',
+            'gen w2 = weight^2\nxtreg mpg weight w2, fe',
             self._aud(),
         )
         self.assertTrue(ok)

@@ -465,3 +465,16 @@ codex 第四轮审出 4 项，全修：
 
 **简历口径（按审计者建议采用）**：可写"构建了多会话、异步任务、结构化错误/溯源、DNS-aware SSRF guard 的
 Windows Stata MCP"；restricted 描述为纵深拦截器而非完整沙箱。
+
+## 27g. P16g 第六轮（2026-09-03，157→162 测试）——varlist-using
+
+第六轮：`use mpg using "C:/outside"` / `describe mpg using ...` / `infile using` 的
+varlist-using 语法让 `_path_token_indices` 误把 varlist 当路径、漏审真正的 using 文件。
+**采纳审计者"最稳妥"方案**：
+- **use/infile/insheet 移出 restricted 白名单**——它们的 varlist-using 路径解析不可靠；
+  数据加载统一走 stata_load_data 工具（audited）。这同时符合"数据进出走结构化工具"的正道。
+- `_path_token_indices` 重写为并集规则：using 后 token + 引号串 + path-like 裸 token +
+  直接文件动词(save/saveold/cd/type)首实参 + copy 前两实参。
+- `describe/des varlist using file` 走 using 审计（内存 `describe varlist` 仍允许）。
+
+restricted 维持"非沙箱"定性：仍只用于代码基本可信场景；对不可信内容用工具而非自由 code。

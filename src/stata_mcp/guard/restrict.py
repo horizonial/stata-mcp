@@ -64,8 +64,9 @@ _ALLOWED_VERBS = {
     "poisson", "nbreg", "xtset", "xtreg", "xtdescribe", "xtsum", "areg",
     "ivregress", "tobit", "heckman", "test", "testparm", "lincom", "estimates",
     "est", "predict", "margins", "nestreg", "sureg",
-    # 文件类（本地授权目录内，走路径审计）在 _FILE_COMMANDS 里已含，并入白名单
-} | _FILE_COMMANDS
+    # 文件类并入白名单，但 P16g：use/infile/insheet 从 restricted 移除——
+    # 它们的 varlist-using 语法路径解析不可靠；数据加载统一走 stata_load_data 工具。
+} | (_FILE_COMMANDS - {"use", "infile", "insheet"})
 # import/export 的已知子命令（文件格式），其他 import(如 import idcode)不管
 _FILE_KINDS = {
     "delimited", "excel", "spss", "sasxport", "sav", "dbase",
@@ -219,32 +220,36 @@ def _audit_one_path(path: str, auditor: DataPathAuditor) -> tuple[bool, str]:
 
 
 def _path_token_indices(verb: str, payload: list[str]) -> list[int]:
-    """按动词定位"哪个 token 是文件路径"（P16c #2 修正 merge 键变量误判）。
+    """定位"哪 (哪些) token 是文件路径"（P16g #1：优先 ``using`` 后，防 varlist 混入）。
 
-    - append/merge：``using`` 之后才是文件；
-    - import/export：跳过 kind（及其后可选 ``using``）后是文件；
-    - copy：前两个非关键字参数都是文件（源 + 目标）；
-    - use/save/saveold/cd/type/insheet/infile/log：第一个非关键字参数是文件。
+    规则（并集，均为"应送 DataPathAuditor"的候选）：
+    1. ``using`` 之后的 token（varlist 在 using 前也不会漏审真正的文件名）；
+    2. 任意带引号的 token（引号串 = 文件名/选项文件值）；
+    3. 无引号但"像路径"的裸 token（含 ``./\\:`` 或已知扩展名），兜底 ``C:\\x``/`foo.dta`；
+    4. 直接文件动词 save/saveold/cd/type 与 copy：无 varlist 歧义，其第一个真实参数是文件。
+    use/infile/insheet 已从命令层移除（varlist 语法歧义不再进入路径审计）。
     """
     low = [t.strip('"').lower() for t in payload]
-    if verb in ("append", "merge"):
-        for i, k in enumerate(low):
-            if k == "using" and i + 1 < len(payload):
-                return [i + 1]
-        return []
-    if verb in ("import", "export"):
-        for i in range(1, len(payload)):
-            if low[i] == "using":
-                return [i + 1] if i + 1 < len(payload) else []
-        return [1] if len(payload) >= 2 else []
-    if verb == "copy":
-        idxs = [i for i, k in enumerate(low) if k not in _KEYWORDS]
-        return idxs[:2]
-    # 单文件动词：第一个非关键字
-    for i, k in enumerate(low):
-        if k not in _KEYWORDS:
-            return [i]
-    return []
+    idxs: list[int] = []
+    for i, tok in enumerate(payload):
+        if tok.startswith('"'):
+            idxs.append(i)
+        if low[i] == "using" and i + 1 < len(payload):
+            idxs.append(i + 1)
+    for i, tok in enumerate(payload):
+        if tok.startswith('"') or low[i] in _KEYWORDS:
+            continue
+        if any(ch in tok for ch in "./\\:") or low[i].endswith(
+            (".dta", ".csv", ".xlsx", ".do", ".dat", ".txt", ".log", ".gph", ".ster", ".raw")
+        ):
+            idxs.append(i)  # path-like 裸 token
+    if verb in ("save", "saveold", "cd", "type", "copy"):
+        real = [i for i, k in enumerate(low) if k not in _KEYWORDS]
+        if verb == "copy":
+            idxs += real[:2]
+        elif real:
+            idxs.append(real[0])  # 直接文件动词第一个真实参数必为文件
+    return sorted(set(idxs))
 
 
 def check_file_paths(code: str, auditor: DataPathAuditor) -> tuple[bool, str]:
