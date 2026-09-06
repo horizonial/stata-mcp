@@ -164,6 +164,68 @@ class BoolStrictTests(unittest.TestCase):
         self.assertFalse(self._as_bool(None, False))
 
 
+class RestrictDeepBypassTests(unittest.TestCase):
+    """P16b #2：restrict 深度绕过面（审计第二轮列出的）都要拦。"""
+
+    def _aud(self):
+        return DataPathAuditor(allowed_dirs=[os.getcwd()])
+
+    def test_append_using_outside(self):
+        outside = os.path.join(tempfile.gettempdir(), "evil.dta")
+        ok, _ = restrict(f'append using "{outside}"', self._aud())
+        self.assertFalse(ok)
+
+    def test_import_delimited_using_outside(self):
+        outside = os.path.join(tempfile.gettempdir(), "e.csv")
+        ok, _ = restrict(f'import delimited using "{outside}"', self._aud())
+        self.assertFalse(ok)
+
+    def test_saveold_outside(self):
+        outside = os.path.join(tempfile.gettempdir(), "o.dta")
+        ok, _ = restrict(f'saveold "{outside}", replace', self._aud())
+        self.assertFalse(ok)
+
+    def test_export_delimited_outside(self):
+        outside = os.path.join(tempfile.gettempdir(), "e.csv")
+        ok, _ = restrict(f'export delimited using "{outside}"', self._aud())
+        self.assertFalse(ok)
+
+    def test_copy_target_outside(self):
+        outside = os.path.join(tempfile.gettempdir(), "dst.dta")
+        ok, _ = restrict(f'copy "auto.dta" "{outside}"', self._aud())
+        self.assertFalse(ok)
+
+    def test_do_external_blocked(self):
+        ok, _ = check_dangerous('do "C:/evil/run.do"')
+        self.assertFalse(ok)
+
+    def test_run_external_blocked(self):
+        ok, _ = check_dangerous("run run_me.do")
+        self.assertFalse(ok)
+
+    def test_macro_path_blocked(self):
+        ok, _ = restrict('use "$evilpath/x.dta"', self._aud())
+        self.assertFalse(ok)
+
+    def test_url_use_blocked(self):
+        ok, _ = restrict('use "https://evil.com/x.dta"', self._aud())
+        self.assertFalse(ok)
+
+    def test_continuation_line_path_blocked(self):
+        outside = os.path.join(tempfile.gettempdir(), "evil.dta")
+        ok, _ = restrict(f'use "{outside}" ///\n, clear', self._aud())
+        self.assertFalse(ok)
+
+    def test_var_named_run_not_blocked_as_danger(self):
+        # run/do/include 只在命令位拦；变量名 run 作为 regress 变量不被误伤
+        ok, _ = check_dangerous("regress mpg run include")
+        self.assertTrue(ok)
+
+    def test_legit_append_in_cwd_allowed(self):
+        ok, _ = restrict('append using "auto.dta"', self._aud())
+        self.assertTrue(ok)
+
+
 class SsrfAuditTests(unittest.TestCase):
     """审计#6：URL 守卫补 localhost/内网域名。"""
 

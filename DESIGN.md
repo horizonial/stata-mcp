@@ -414,3 +414,11 @@ SetInformationJobObject 静默失败（kill-on-close 不生效）。
 5. **后台结果丢结构化/provenance**（P2）：`enrich_structured` 抽成 run/task_status 共用，后台任务现在返回 structured + provenance。
 6. **URL 守卫非完整 SSRF**（P2）：补拒 localhost/127.x/*.local/云元数据域名；DNS rebinding 等仍属已知边界（需解析后校验，文档已注）。
 
+## 27b. P16b 二轮审计修复（2026-09-03，104→123 测试）
+
+二轮审计 4 项全部核验属实并修复：
+1. **session_id 端到端贯穿**：`_resolve_backend(ctx, _session_arg(args))` 接入全部 8 工具 + 后台任务（TaskRunner.submit 按 session_id 路由）。背景：多会话架构已支持但工具层死壳。
+2. **restrict 深度绕过**：重写 restrict.py——合并 `///` 续行、`append/merge ... using`、`import/export <kind> [using]`、saveold、copy 源+目的、do/run/include（命令位，不误伤变量名）、宏 `$`/复合引号 fail-closed、URL 拒绝、`://` 不剥注释。**边界声明**：restricted 是静态尽力 + fail-closed，非完备沙箱。
+3. **worker 死亡非 fail-fast**：实测打脸——multiprocessing Queue 父持写端导致 worker 被杀不触发 EOF、干等 300s。修：`_recv` 轮询 `proc.is_alive()`（0.5s 步长）崩溃即抛 _WorkerDead；启动超时 60→20s。**顺带发现并修了一个隐藏死锁**：execute 持锁时调 `journal()` 二次加锁 → reset 路径死锁（解释了此前 spike71 莫名卡住）。
+4. **bool 参数严格校验**：`_as_bool`——字符串 "false"/"0"/"no" 不当 True（background/clear/restricted 均走它；clear="false" 不再误覆盖数据）。
+
