@@ -23,7 +23,7 @@ from ..envelope import Envelope
 from ..guard.data_path import DataPathAuditor
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 # 模块级配置缓存：分层配置是进程内静态的，读一次即可（load_config 每次读盘+合并，
 # 多工具共享时不值得每个工具调用都重读）。需要时测试可把本变量置回 None 重新加载。
@@ -32,6 +32,10 @@ _cfg: dict | None = None
 _STATA_LOAD_DATA_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
         "source": {
             "type": "string",
             "description": "要加载的数据文件路径或 https URL（.dta/.csv/.xlsx/.xls）。"
@@ -45,11 +49,7 @@ _STATA_LOAD_DATA_SCHEMA: dict = {
             "default": False,
         },
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": ["source"],
+            "required": ["source"],
 }
 
 
@@ -73,6 +73,7 @@ def _auditor() -> DataPathAuditor:
         allowed_dirs=allowed,
         enable_url_guard=bool(get_security(cfg, "enable_url_guard", True)),
         allowed_hosts=list(get_security(cfg, "allowed_hosts") or []),
+        enable_dns_resolve=bool(get_security(cfg, "enable_url_dns_resolve", True)),
     )
 
 
@@ -187,7 +188,10 @@ def stata_load_data(arguments: dict, ctx=None) -> Envelope:
         cmd_source = os.path.abspath(source)
 
     command = _build_load_command(cmd_source, clear)
-    session = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+    if sid_err:
+        return invalid_session_result("stata_load_data", sid_err)
+    session = _resolve_backend(ctx, sid)
     t0 = time.perf_counter()
     result = session.execute(command)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

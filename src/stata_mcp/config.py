@@ -37,6 +37,9 @@ _DEFAULTS: dict = {
         "enable_url_guard": True,
         # 域名白名单。空 = 不做 host 白名单限制（仍强制 https、拒 IP/userinfo）。
         "allowed_hosts": [],
+        # URL 的 DNS 解析校验（P16c #4）：解析 host→IP，命中私网/回环即拒。
+        # 离线环境可关（则退化为纯字符串规则）。
+        "enable_url_dns_resolve": True,
         # 受限模式（P12）：拦截 shell 逃逸/文件删除/越权路径。默认关——本地可信
         # agent 场景无限制；跑不可信代码时显式开启，防有害文件注入。
         "restricted_mode": False,
@@ -67,6 +70,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, str, Callable[[str], object]]] = {
     "STATAMCP_ALLOWED_HOSTS": ("security", "allowed_hosts", _parse_list),
     "STATAMCP_RESTRICTED": ("security", "restricted_mode", _parse_bool),
     "STATAMCP_MAX_SESSIONS": ("security", "max_sessions", int),
+    "STATAMCP_URL_DNS_RESOLVE": ("security", "enable_url_dns_resolve", _parse_bool),
 }
 
 

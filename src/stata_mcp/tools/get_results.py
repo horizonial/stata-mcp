@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from ..envelope import Envelope
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 _STATA_GET_RESULTS_SCHEMA: dict = {
     "type": "object",
@@ -27,7 +27,10 @@ def stata_get_results(arguments: dict, ctx=None) -> Envelope:
     """返回当前会话内存里的估计(e())/描述统计(r())/形状 结构化结果（只读）。"""
     meta = {"tool": "stata_get_results"}
     args = arguments if isinstance(arguments, dict) else {}
-    session = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+    if sid_err:
+        return invalid_session_result("stata_get_results", sid_err)
+    session = _resolve_backend(ctx, sid)
 
     snap = session.snapshot()
     reset = snap.get("reset", False)

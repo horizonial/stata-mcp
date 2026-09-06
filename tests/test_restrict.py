@@ -226,6 +226,56 @@ class RestrictDeepBypassTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class SchemaSessionIdTests(unittest.TestCase):
+    """P16d：声明了 session_id 的工具，schema 必须把它放在 properties 内（非顶层）。"""
+
+    def test_session_id_inside_properties(self):
+        from stata_mcp.tools import TOOLS
+
+        # 声明了 session_id 的工具（在 properties 里才算声明）
+        advertised = [
+            n for n, t in TOOLS.items()
+            if "session_id" in t.input_schema.get("properties", {})
+        ]
+        self.assertTrue(len(advertised) >= 5, f"应有多工具声明 session_id, got {advertised}")
+        for name in advertised:
+            schema = TOOLS[name].input_schema
+            self.assertNotIn("session_id", schema, f"{name}: session_id 不应在顶层")
+            self.assertIn("session_id", schema["properties"], f"{name}: 应在 properties 内")
+        # 顶层绝不允许出现 session_id（防放错层级回归）
+        for name, t in TOOLS.items():
+            self.assertNotIn("session_id", t.input_schema, f"{name}: 顶层不应有 session_id")
+
+
+class StrictInvalidSessionTests(unittest.TestCase):
+    """P16d：非法 session_id 全工具显式报错，不静默回退 default。"""
+
+    def _call(self, tool, args):
+        from stata_mcp.tools import TOOLS
+
+        return TOOLS[tool].handler(args, None)
+
+    def test_get_results_invalid_id_errors(self):
+        env = self._call("stata_get_results", {"session_id": "../bad"})
+        self.assertEqual(env.rc, 1)
+        self.assertIn("session_id", env.text.lower())
+
+    def test_load_data_invalid_id_errors(self):
+        # 给 cwd 内 source 让它走到 session 校验（此前因缺 source 提前返回）
+        env = self._call("stata_load_data", {"source": "auto.dta", "session_id": "idea.A"})
+        self.assertEqual(env.rc, 1)
+        self.assertIn("session_id", env.text.lower())
+
+    def test_empty_session_id_errors(self):
+        env = self._call("stata_session_history", {"session_id": "  "})
+        self.assertEqual(env.rc, 1)
+
+    def test_valid_session_id_not_blank_error(self):
+        # 合法 id 不应因校验报错；因无引擎/无 ctx 走到别处，但不应是 session 校验错
+        env = self._call("stata_get_results", {"session_id": "ideaA"})
+        self.assertNotIn("invalid session_id", env.text.lower())
+
+
 class WhitelistFailClosedTests(unittest.TestCase):
     """P16c #2：restricted = 命令白名单 fail-closed（未知命令默认拒绝）。"""
 

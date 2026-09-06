@@ -20,13 +20,17 @@ from ..envelope import Envelope
 from ..guard.validate import validate_varname
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 _ACTIONS = ("describe", "summarize", "codebook")
 
 _STATA_INSPECT_DATA_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
         "action": {
             "type": "string",
             "enum": list(_ACTIONS),
@@ -41,11 +45,7 @@ _STATA_INSPECT_DATA_SCHEMA: dict = {
             "名字须为合法 Stata 变量名（字母/下划线开头，长度 1–32）。",
         },
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": [],
+            "required": [],
 }
 
 
@@ -144,7 +144,10 @@ def stata_inspect_data(arguments: dict, ctx=None) -> Envelope:
         )
 
     command = _build_command(action, varlist)
-    session = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+    if sid_err:
+        return invalid_session_result("stata_inspect_data", sid_err)
+    session = _resolve_backend(ctx, sid)
     t0 = time.perf_counter()
     result = session.execute(command)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0

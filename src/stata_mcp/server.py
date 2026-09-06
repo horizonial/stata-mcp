@@ -138,8 +138,9 @@ def build_server() -> Server:
     return Server(
         name="stata-mcp",
         version=__version__,
-        instructions="Execute Stata code. All calls share one persistent in-process "
-        "Stata session (data/scalars persist across calls).",
+        instructions="Execute Stata code via one or more sessions (each an isolated "
+        "persistent Stata worker; data/scalars persist within a session). "
+        "Most tools accept a session_id to target a specific session.",
         on_list_tools=_list_tools,
         on_call_tool=_call_tool,
     )

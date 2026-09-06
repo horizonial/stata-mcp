@@ -9,16 +9,16 @@ from . import register
 _STATA_TASK_STATUS_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "job_id": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
+                "job_id": {
             "type": "string",
             "description": "stata_run(background=True) 返回的 job_id。",
         }
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": ["job_id"],
+            "required": ["job_id"],
 }
 
 
@@ -60,17 +60,7 @@ def stata_task_status(arguments: dict, ctx=None) -> Envelope:
             graphs=[],
             meta={"tool": "stata_task_status", "job_id": job_id, "status": status},
         )
-    if status == ERROR:
-        return Envelope(
-            text=f"error: {task.get('error', 'unknown error')}",
-            structured=None,
-            rc=1,
-            error_class=None,
-            graphs=[],
-            meta={"tool": "stata_task_status", "job_id": job_id, "status": status},
-        )
-
-    # DONE/ERROR：完整对齐同步路径的 Envelope（P16c #3：错误可区分、含 replay/elapsed）。
+    # DONE/ERROR 走同一 formatter（P16d：删掉 ERROR 提前返回，补齐 error/elapsed/replay）。
     result = task.get("result")
     code = task.get("code", "")
     text = strip_smcl(result.text) if result else task.get("error", "")

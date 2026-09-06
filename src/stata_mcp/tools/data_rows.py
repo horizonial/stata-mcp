@@ -8,11 +8,15 @@ from __future__ import annotations
 
 from ..envelope import Envelope
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 _STATA_DATA_ROWS_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
         "rows": {
             "type": "integer",
             "description": "要读的行数（1-50，默认 10）。",
@@ -21,11 +25,7 @@ _STATA_DATA_ROWS_SCHEMA: dict = {
             "default": 10,
         }
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": [],
+            "required": [],
 }
 
 
@@ -43,7 +43,13 @@ def stata_data_rows(arguments: dict, ctx=None) -> Envelope:
         )
     n = max(1, min(int(n), 50))
 
-    session = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+
+    if sid_err:
+
+        return invalid_session_result("stata_data_rows", sid_err)
+
+    session = _resolve_backend(ctx, sid)
     preview = session.preview(n)
     if not preview or "variables" not in preview:
         return Envelope(

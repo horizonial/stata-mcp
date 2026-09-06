@@ -117,13 +117,12 @@ def _session_arg(args):
     return s, None
 
 
-def _session_arg_loose(args) -> str | None:
-    """宽松版：取校验过的 session_id；未提供/非法 → None（回退 default）。
-
-    供"路由到指定会话但非法时不阻塞"的次要工具使用（主工具 stata_run 用严格版）。
-    """
-    sid, _err = _session_arg(args)
-    return sid
+def invalid_session_result(tool: str, err: str) -> Envelope:
+    """非法 session_id 的统一拒绝 Envelope（P16d：全工具严格，不静默回退）。"""
+    return Envelope(
+        text=f"error: {err}",
+        structured=None, rc=1, error_class=None, graphs=[], meta={"tool": tool},
+    )
 
 
 def enrich_structured(structured, code: str, result) -> dict:
@@ -171,6 +170,7 @@ def _check_restricted(code: str, arguments: dict) -> Envelope | None:
         allowed_dirs=[os.getcwd()] + list(get_security(cfg, "allowed_data_dirs") or []),
         enable_url_guard=bool(get_security(cfg, "enable_url_guard", True)),
         allowed_hosts=list(get_security(cfg, "allowed_hosts") or []),
+        enable_dns_resolve=bool(get_security(cfg, "enable_url_dns_resolve", True)),
     )
     allowed, reason = restrict(code, auditor)
     if not allowed:

@@ -430,3 +430,12 @@ SetInformationJobObject 静默失败（kill-on-close 不生效）。
 3. **后台任务生命周期**：task_status 补全 error/error_kind/error_class/session_reset/replay/elapsed（对齐同步 Envelope）；TaskRunner 记录 submitted/finished/elapsed，任务表加 TTL(1h)+上限(200) 清理防堆积。
 4. **URL 守卫 DNS 层 SSRF**：check_url 解析 host→实际 IP，命中私网/回环/链路本地即拒（nip.io/foo.localhost）；数字 IP（2130706433）拒；白名单命中的域跳过 DNS（用户显式钉死）；`enable_dns_resolve` 可关（离线）。DNS rebinding 完整防御需连接时二次校验（已知边界，文档已注）。
 
+## 27d. P16d 发布前收尾（2026-09-03，133→138 测试）
+
+codex 逐行审出 P16c 的 5 个实现缺陷，全修：
+1. **session_id schema 放错层级**：批量脚本把属性插到 properties **外面**（顶层），客户端 tools/list 看不到。重做：删除后插进 `properties` 内（全部 10 工具 top=False/props=True），加回归测试断言"session_id 必在 properties 内、绝不在顶层"。
+2. **非法 session_id 静默回退**：删 `_session_arg_loose`，8 工具全用严格 `_session_arg`→`invalid_session_result`（`../bad`/`idea.A`/空串 显式报错，不回落 default）。
+3. **TaskRunner 预建 default**：`__init__` 不再 get_or_create；submit 时才解析（session_id → 指定；否则 default 惰性）。加 `_MAX_ACTIVE=64`/`_MAX_TOTAL=1024`（超限抛 TaskCapacityExceeded）；`status()/snapshot()` 前也 `_prune`（不只 submit）。
+4. **task_status ERROR 提前返回**：删掉 ERROR 分支提前 return，DONE/ERROR 走同一 formatter（补 error/error_kind/error_class/elapsed/replay）。
+5. 发布收尾：`enable_dns_resolve` 接入 `config[security].enable_url_dns_resolve` + env `STATAMCP_URL_DNS_RESOLVE`（load_data/run 的 auditor 都传）；server instructions 文案改为多会话模型；`__version__` 0.2.0→1.0.0 与 pyproject 统一。DNS rebinding 静态 guard 局限已注（需连接层/HTTP 代理二次校验）。
+

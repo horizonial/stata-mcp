@@ -19,13 +19,17 @@ from ..envelope import Envelope
 from ..guard.validate import is_valid_identifier
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 _FORMATS = ("png", "svg", "pdf")
 
 _STATA_EXPORT_GRAPH_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
         "format": {
             "type": "string",
             "enum": list(_FORMATS),
@@ -42,11 +46,7 @@ _STATA_EXPORT_GRAPH_SCHEMA: dict = {
             "description": "输出文件名（不含目录，不含路径分隔符）；省略则自动生成。",
         },
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": [],
+            "required": [],
 }
 
 
@@ -100,7 +100,13 @@ def stata_export_graph(arguments: dict, ctx=None) -> Envelope:
     name_clause = f", name({name})" if name else ""
     command = f'graph export "{stata_path}"{name_clause} replace'
 
-    backend = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+
+    if sid_err:
+
+        return invalid_session_result("stata_export_graph", sid_err)
+
+    backend = _resolve_backend(ctx, sid)
     result = backend.execute(command)
     text = strip_smcl(result.text)
 

@@ -14,21 +14,21 @@ from ..envelope import Envelope
 from ..guard.validate import is_valid_identifier
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 _STATA_GET_HELP_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
         "topic": {
             "type": "string",
             "description": "要查询的 Stata 命令/主题（如 regress、xtreg、ereturn）。",
         }
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": ["topic"],
+            "required": ["topic"],
 }
 
 
@@ -63,7 +63,13 @@ def stata_get_help(arguments: dict, ctx=None) -> Envelope:
             structured=None, rc=1, error_class=None, graphs=[], meta=meta,
         )
 
-    session = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+
+    if sid_err:
+
+        return invalid_session_result("stata_get_help", sid_err)
+
+    session = _resolve_backend(ctx, sid)
     # findfile 输出文本含 .sthlp 路径（末行非空），也可从 r(fn) 读；这里取文本末行。
     r = session.execute(f"findfile {topic}.sthlp")
     if r.rc != 0 or not r.text.strip():

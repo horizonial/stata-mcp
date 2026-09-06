@@ -7,11 +7,15 @@ from __future__ import annotations
 
 from ..envelope import Envelope
 from . import register
-from .run import _resolve_backend, _session_arg_loose
+from .run import _resolve_backend, _session_arg, invalid_session_result
 
 _STATA_SESSION_HISTORY_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "会话标识；省略用 'default'。",
+        },
         "last": {
             "type": "integer",
             "description": "只返回最近 N 条（默认全部，上限 100）。",
@@ -19,11 +23,7 @@ _STATA_SESSION_HISTORY_SCHEMA: dict = {
             "maximum": 100,
         }
     },
-            "session_id": {
-            "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-"required": [],
+            "required": [],
 }
 
 
@@ -34,7 +34,13 @@ def stata_session_history(arguments: dict, ctx=None) -> Envelope:
     last = args.get("last", None)
     meta = {"tool": "stata_session_history"}
 
-    session = _resolve_backend(ctx, _session_arg_loose(args))
+    sid, sid_err = _session_arg(args)
+
+    if sid_err:
+
+        return invalid_session_result("stata_session_history", sid_err)
+
+    session = _resolve_backend(ctx, sid)
     journal = session.journal()
     if isinstance(last, int) and not isinstance(last, bool) and last > 0:
         journal = journal[-last:]
