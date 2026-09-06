@@ -422,3 +422,11 @@ SetInformationJobObject 静默失败（kill-on-close 不生效）。
 3. **worker 死亡非 fail-fast**：实测打脸——multiprocessing Queue 父持写端导致 worker 被杀不触发 EOF、干等 300s。修：`_recv` 轮询 `proc.is_alive()`（0.5s 步长）崩溃即抛 _WorkerDead；启动超时 60→20s。**顺带发现并修了一个隐藏死锁**：execute 持锁时调 `journal()` 二次加锁 → reset 路径死锁（解释了此前 spike71 莫名卡住）。
 4. **bool 参数严格校验**：`_as_bool`——字符串 "false"/"0"/"no" 不当 True（background/clear/restricted 均走它；clear="false" 不再误覆盖数据）。
 
+## 27c. P16c 三轮审计修复（2026-09-03，104→133 测试）
+
+三轮审计 4 类，全部核验属实并修复：
+1. **多会话契约闭环**：session_id 加入全部工具 schema（tools/list 可见）；make_context **惰性**（不再每次预建 default，避免 max_sessions=1 时占位挡掉 ideaA）；非法 session_id（`../ideaA`/`idea.A`）显式报错而非静默回退 default（_session_arg 返回 (sid,error)）。
+2. **restricted → fail-closed 命令白名单**：黑名单（未知放行）哲学改为**白名单（不在 `_ALLOWED_VERBS` 一律拒）**。新增封堵：graph export/putexcel/outfile/filefilter/webuse/python:/mata:/未知命令；路径定位按动词（append/merge 的 `using` 后才是文件、copy 源+目标、import/export 跳过 kind）；无引号含冒号路径（`C:secret`）fail-closed；修了 merge 键变量 `1:1` 被误当路径的回归。**边界声明**：restricted 是"白名单命令集 + 本地目录数据操作"，非完备沙箱——真正不可信场景应走结构化工具不经自由 code。
+3. **后台任务生命周期**：task_status 补全 error/error_kind/error_class/session_reset/replay/elapsed（对齐同步 Envelope）；TaskRunner 记录 submitted/finished/elapsed，任务表加 TTL(1h)+上限(200) 清理防堆积。
+4. **URL 守卫 DNS 层 SSRF**：check_url 解析 host→实际 IP，命中私网/回环/链路本地即拒（nip.io/foo.localhost）；数字 IP（2130706433）拒；白名单命中的域跳过 DNS（用户显式钉死）；`enable_dns_resolve` 可关（离线）。DNS rebinding 完整防御需连接时二次校验（已知边界，文档已注）。
+

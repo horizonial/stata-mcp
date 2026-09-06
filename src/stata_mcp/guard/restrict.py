@@ -40,6 +40,28 @@ _FILE_COMMANDS = {
     "use", "insheet", "infile", "append", "merge", "save", "saveold",
     "copy", "cd", "type", "log", "import", "export",
 }
+
+# 命令白名单（P16c #2 fail-closed）：不在白名单的命令一律拒绝。
+# 受限模式只允许"本地授权目录内的数据分析"，禁网络(webuse)、禁 OS 逃逸
+# (python:/mata:/shell/filefilter/putexcel/outfile/...)、禁执行外部代码(do/run/include)、
+# 禁任意图导出(graph export 需写外部文件)。含常见缩写（su/di/reg...）。
+_ALLOWED_VERBS = {
+    # 输出/环境
+    "display", "di", "set", "macro", "scalar", "matrix", "return",
+    "ereturn", "assert", "preserve", "restore", "frame", "clear",
+    # 数据处理
+    "gen", "generate", "g", "egen", "replace", "drop", "keep", "sort",
+    "order", "rename", "label", "lab", "encode", "decode", "destring",
+    "tostring", "recode", "tempvar", "tempfile", "capture", "by", "bysort",
+    # 统计
+    "summarize", "sum", "su", "describe", "des", "list", "li", "count",
+    "codebook", "tabulate", "tab", "table", "quietly", "qui", "noisily",
+    "regress", "reg", "logit", "probit", "oprobit", "ologit", "mlogit",
+    "poisson", "nbreg", "xtset", "xtreg", "xtdescribe", "xtsum", "areg",
+    "ivregress", "tobit", "heckman", "test", "testparm", "lincom", "estimates",
+    "est", "predict", "margins", "nestreg", "sureg",
+    # 文件类（本地授权目录内，走路径审计）在 _FILE_COMMANDS 里已含，并入白名单
+} | _FILE_COMMANDS
 # import/export 的已知子命令（文件格式），其他 import(如 import idcode)不管
 _FILE_KINDS = {
     "delimited", "excel", "spss", "sasxport", "sav", "dbase", "haver",
@@ -192,6 +214,35 @@ def _audit_one_path(path: str, auditor: DataPathAuditor) -> tuple[bool, str]:
     return True, ""
 
 
+def _path_token_indices(verb: str, payload: list[str]) -> list[int]:
+    """按动词定位"哪个 token 是文件路径"（P16c #2 修正 merge 键变量误判）。
+
+    - append/merge：``using`` 之后才是文件；
+    - import/export：跳过 kind（及其后可选 ``using``）后是文件；
+    - copy：前两个非关键字参数都是文件（源 + 目标）；
+    - use/save/saveold/cd/type/insheet/infile/log：第一个非关键字参数是文件。
+    """
+    low = [t.strip('"').lower() for t in payload]
+    if verb in ("append", "merge"):
+        for i, k in enumerate(low):
+            if k == "using" and i + 1 < len(payload):
+                return [i + 1]
+        return []
+    if verb in ("import", "export"):
+        for i in range(1, len(payload)):
+            if low[i] == "using":
+                return [i + 1] if i + 1 < len(payload) else []
+        return [1] if len(payload) >= 2 else []
+    if verb == "copy":
+        idxs = [i for i, k in enumerate(low) if k not in _KEYWORDS]
+        return idxs[:2]
+    # 单文件动词：第一个非关键字
+    for i, k in enumerate(low):
+        if k not in _KEYWORDS:
+            return [i]
+    return []
+
+
 def check_file_paths(code: str, auditor: DataPathAuditor) -> tuple[bool, str]:
     """审计路径类命令的文件路径是否越权（P16b：using/多词/saveold/export/copy/宏）。"""
     for stmt in _split_statements(code):
@@ -202,46 +253,58 @@ def check_file_paths(code: str, auditor: DataPathAuditor) -> tuple[bool, str]:
         rest = toks[1:]
         if verb not in _FILE_COMMANDS:
             continue
+        if verb in ("import", "export") and rest and _first_token(rest[0]) not in _FILE_KINDS:
+            continue  # 非文件的 import/export（如 import idcode）
 
-        # import/export/log/copy 是动词+子命令；确定"是否文件命令 + 有效负载 token"
-        payload: list[str] = []
-        if verb in ("import", "export"):
-            if not rest:
+        idxs = _path_token_indices(verb, rest)
+        for idx in idxs:
+            if idx >= len(rest):
                 continue
-            kind = _first_token(rest[0])
-            if kind not in _FILE_KINDS:
-                continue  # 非文件的 import/export
-            payload = rest[1:]
-        elif verb == "copy":
-            payload = rest  # copy 源 + 目标都要审（任一越权即拒）
-        else:
-            payload = rest
+            tok = rest[idx]
+            quoted = tok.startswith('"')
+            path = tok[1:-1] if quoted else tok
+            if not path:
+                continue
+            if not quoted and ":" in path:
+                # 无引号却含冒号（如 C:secret / C:\x）：fail-closed，要求引号包完整路径
+                return False, f"unquoted drive/URL path {path!r} is not allowed in restricted mode"
+            ok, reason = _audit_one_path(path, auditor)
+            if not ok:
+                return False, reason
+    return True, ""
 
-        # 逐 payload token：跳过纯关键字
-        for tok in payload:
-            low = tok.strip('"').lower()
-            if low in _KEYWORDS or not tok.strip():
-                continue
-            # 引号字符串必然是路径候选
-            if tok.startswith('"'):
-                ok, reason = _audit_one_path(tok[1:-1], auditor)
-                if not ok:
-                    return False, reason
-                continue
-            # 裸 token：命令位/含路径特征才算候选，避免把变量名当路径误伤
-            is_bare_filename = any(ch in tok for ch in "./\\") or low.endswith(
-                (".dta", ".csv", ".xlsx", ".do", ".dat", ".txt", ".log", ".gph")
-            )
-            if is_bare_filename:
-                ok, reason = _audit_one_path(tok, auditor)
-                if not ok:
-                    return False, reason
+
+def check_commands(code: str) -> tuple[bool, str]:
+    """命令白名单 fail-closed（P16c #2）：不在 _ALLOWED_VERBS 的命令一律拒绝。
+
+    import/export 等按子命令判断（import excel 合法、python:/mata: 等非法）。
+    这使得 unknown 命令**默认拒绝**（此前黑名单是未知放行——哲学差别）。
+    """
+    for stmt in _split_statements(code):
+        toks = _tokens(stmt)
+        if not toks:
+            continue
+        verb = _first_token(toks[0])
+        # 两词/子命令形态
+        if verb in ("import", "export", "graph", "putexcel", "outfile", "filefilter"):
+            if verb in ("import", "export") and len(toks) > 1:
+                sub = _first_token(toks[1])
+                if verb == "import" and sub in _FILE_KINDS:
+                    continue  # import <kind> 走文件审计，白名单放行
+                if verb == "export" and sub in _FILE_KINDS:
+                    continue
+            return False, f"command '{verb}' is not allowed in restricted mode"
+        if verb not in _ALLOWED_VERBS:
+            return False, f"command '{verb}' is not allowed in restricted mode"
     return True, ""
 
 
 def restrict(code: str, auditor: DataPathAuditor) -> tuple[bool, str]:
-    """受限模式总闸：先查危险命令，再查越权路径。返回 (allowed, reason)。"""
+    """受限模式总闸（fail-closed）：危险命令 → 命令白名单 → 越权路径。"""
     ok, reason = check_dangerous(code)
+    if not ok:
+        return False, reason
+    ok, reason = check_commands(code)
     if not ok:
         return False, reason
     ok, reason = check_file_paths(code, auditor)

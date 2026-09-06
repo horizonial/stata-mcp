@@ -70,20 +70,50 @@ def stata_task_status(arguments: dict, ctx=None) -> Envelope:
             meta={"tool": "stata_task_status", "job_id": job_id, "status": status},
         )
 
-    # DONE：附结果文本 + rc + 结构化 + provenance（P16 修复：后台结果此前丢结构化）
+    # DONE/ERROR：完整对齐同步路径的 Envelope（P16c #3：错误可区分、含 replay/elapsed）。
     result = task.get("result")
     code = task.get("code", "")
-    text = strip_smcl(result.text) if result else ""
+    text = strip_smcl(result.text) if result else task.get("error", "")
+    rc = result.rc if result else (1 if status == ERROR else 0)
+
     structured = None
     if result is not None and getattr(result, "structured", None):
         from .run import enrich_structured
 
         structured = enrich_structured(result.structured, code, result)
+
+    error_class = None
+    if rc != 0 and text:
+        from ..output.errors import classify_error
+
+        error_class = classify_error(rc, text)
+
+    # 统一错误对象（command_failed / timeout / crashed / start_failed）
+    error = None
+    kind = result.error_kind if result is not None else ("crashed" if status == ERROR else None)
+    if kind == "timeout":
+        error = {"kind": "timeout", "message": text or "command was interrupted after timeout"}
+    elif kind in ("crashed", "start_failed"):
+        error = {"kind": kind, "message": text or "Stata session crashed"}
+    elif rc != 0:
+        error = {"kind": "command_failed", "rc": rc, "class": error_class, "message": text}
+
+    meta = {"tool": "stata_task_status", "job_id": job_id, "status": status}
+    if task.get("elapsed_ms") is not None:
+        meta["elapsed_ms"] = task["elapsed_ms"]
+    if getattr(result, "reset", False):
+        meta["session_reset"] = True
+    if getattr(result, "replay", None):
+        cmds = [e.get("cmd") for e in result.replay if e.get("cmd")]
+        meta["replay"] = cmds[-30:]
+        meta["replay_full"] = len(cmds)
+
     return Envelope(
-        text=text or "(task finished with empty output)",
+        text=text or ("(task finished with empty output)" if status == DONE else "error"),
         structured=structured,
-        rc=result.rc if result else 0,
-        error_class=None,
+        rc=rc,
+        error_class=error_class,
         graphs=[],
-        meta={"tool": "stata_task_status", "job_id": job_id, "status": status},
+        meta=meta,
+        error=error,
     )

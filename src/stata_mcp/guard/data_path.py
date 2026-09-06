@@ -28,6 +28,31 @@ def _is_ip_literal(host: str) -> bool:
         return False
 
 
+def _resolves_public(host: str) -> bool:
+    """解析 host 到 IP，任何解析结果是私网/回环/链路本地/保留 → False（拒绝）。
+
+    覆盖 ``10.0.0.1.nip.io``（解析到 10.x）、``foo.localhost``（解析到 127.0.0.1）
+    这类"字符串看起来是域名、实际连内网"的 SSRF 绕过（P16c #4）。
+    解析失败（离线/无 DNS）：fail-closed 返回 False——受限/URL 加载场景本就需联网。
+    """
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False  # 解析失败 → fail-closed
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            ip = ipaddress.ip_address(ip_str.split("%")[0])
+        except ValueError:
+            continue
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            return False
+    return True
+
+
 def _normalize_dir(d: str) -> str:
     """把授权目录归一成"可比较形态"：绝对 + realpath + normcase。
 
@@ -53,12 +78,15 @@ class DataPathAuditor:
         allowed_dirs: list[str] | None = None,
         enable_url_guard: bool = True,
         allowed_hosts: list[str] | None = None,
+        enable_dns_resolve: bool = True,
     ) -> None:
         if allowed_dirs is None:
             allowed_dirs = []
         if allowed_hosts is None:
             allowed_hosts = []
         self.enable_url_guard = bool(enable_url_guard)
+        # P16c #4：是否做 DNS 解析校验（拒"解析到内网"的域名）。离线环境可关。
+        self.enable_dns_resolve = bool(enable_dns_resolve)
 
         # host 白名单统一小写存储；单个 host 含非法字符/空 → 丢弃（fail-closed 更保守）
         self._allowed_hosts = {
@@ -128,21 +156,32 @@ class DataPathAuditor:
             # 拒绝 IP 字面量：SSRF 的核心入口是"让服务器去连内网 IP"
             if _is_ip_literal(host):
                 return False
+            # 数字形式的 IP（2130706433 == 127.0.0.1，绕过 ip 字面量检查）
+            if host.isdigit():
+                return False
             # 拒绝 localhost / 本机 / 内网域（P16：补 SSRF 常见绕过）
-            #   localhost、127.x、[::1]、*.local（mDNS 内网）、常见云元数据域名。
-            if host == "localhost" or host.endswith(".local"):
+            if host == "localhost" or host.startswith("localhost"):
+                return False
+            if host.endswith(".local") or host.endswith(".localhost"):
                 return False
             if host.startswith("127.") or host == "::1":
                 return False
             if host in ("metadata.google.internal", "metadata.azure.internal",
                         "169.254.169.254.nip.io", "metadata"):
                 return False
-            # 可选域名白名单：host 精确匹配或以 .allowed 结尾（子域匹配）
-            if self._allowed_hosts:
-                if not any(
-                    host == allowed or host.endswith("." + allowed)
-                    for allowed in self._allowed_hosts
-                ):
+            # 可选域名白名单：host 精确匹配或以 .allowed 结尾（子域匹配）。
+            # 命中白名单 = 用户显式信任该域 → 跳过 DNS 校验（离线/子域不存在也能用）。
+            whitelisted = bool(self._allowed_hosts) and any(
+                host == allowed or host.endswith("." + allowed)
+                for allowed in self._allowed_hosts
+            )
+            if not whitelisted:
+                if self._allowed_hosts:
+                    return False
+                # DNS 解析校验（P16c #4）：非白名单域名须解析到公网 IP。
+                # nip.io/foo.localhost 这类"解析成内网"被拒。DNS rebinding 完整防御
+                # 需在连接时二次校验（已知边界）。
+                if self.enable_dns_resolve and not _resolves_public(host):
                     return False
             return True
         except ValueError:

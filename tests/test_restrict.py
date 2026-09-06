@@ -226,30 +226,83 @@ class RestrictDeepBypassTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class WhitelistFailClosedTests(unittest.TestCase):
+    """P16c #2：restricted = 命令白名单 fail-closed（未知命令默认拒绝）。"""
+
+    def _aud(self):
+        return DataPathAuditor(allowed_dirs=[os.getcwd()])
+
+    def test_graph_export_blocked(self):
+        ok, _ = restrict('graph export "C:\\outside.png" replace', self._aud())
+        self.assertFalse(ok)
+
+    def test_putexcel_blocked(self):
+        ok, _ = restrict('putexcel using C:\\outside.xlsx', self._aud())
+        self.assertFalse(ok)
+
+    def test_outfile_blocked(self):
+        ok, _ = restrict('outfile using C:\\outside.txt', self._aud())
+        self.assertFalse(ok)
+
+    def test_filefilter_blocked(self):
+        ok, _ = restrict('filefilter "in.txt" "C:\\out.txt"', self._aud())
+        self.assertFalse(ok)
+
+    def test_webuse_blocked(self):
+        ok, _ = restrict("webuse auto", self._aud())
+        self.assertFalse(ok)
+
+    def test_python_mata_blocked(self):
+        ok, _ = restrict('python: open(r"C:\\e", "w")', self._aud())
+        self.assertFalse(ok)
+        ok2, _ = restrict('mata: fopen("C:\\e", "w")', self._aud())
+        self.assertFalse(ok2)
+
+    def test_saveold_outside_blocked(self):
+        ok, _ = restrict("saveold C:secret", self._aud())
+        self.assertFalse(ok)
+
+    def test_unknown_command_rejected(self):
+        ok, _ = restrict("some_unknown_evil_cmd x", self._aud())
+        self.assertFalse(ok)
+
+    def test_legit_analysis_allowed(self):
+        # 本地数据分析：读目录内数据 + gen + xtreg 都应在白名单放行
+        ok, _ = restrict(
+            'use "auto.dta"\ngen w2 = weight^2\nxtreg mpg weight w2, fe',
+            self._aud(),
+        )
+        self.assertTrue(ok)
+
+    def test_xtset_xtreg_allowed(self):
+        ok, _ = restrict("xtset id t\nxtreg y x, fe", self._aud())
+        self.assertTrue(ok)
+
+
 class SsrfAuditTests(unittest.TestCase):
     """审计#6：URL 守卫补 localhost/内网域名。"""
 
     def test_localhost_https_blocked(self):
-        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True, enable_dns_resolve=False)
         self.assertFalse(a.check_url("https://localhost:4000/x.csv"))
         self.assertFalse(a.check_url("https://127.0.0.1/x.dta"))
 
     def test_local_domain_blocked(self):
-        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True, enable_dns_resolve=False)
         self.assertFalse(a.check_url("https://router.local/secret"))
 
     def test_cloud_metadata_blocked(self):
-        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True, enable_dns_resolve=False)
         self.assertFalse(a.check_url("https://metadata.google.internal/computeMetadata/v1/"))
 
     def test_public_https_without_whitelist_allowed(self):
-        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True, enable_dns_resolve=False)
         self.assertTrue(a.check_url("https://stats.oecd.org/data.csv"))
 
     def test_whitelist_still_respected(self):
         a = DataPathAuditor(
             allowed_dirs=[os.getcwd()], enable_url_guard=True,
-            allowed_hosts=["example.com"],
+            allowed_hosts=["example.com"], enable_dns_resolve=False,
         )
         self.assertTrue(a.check_url("https://data.example.com/x.csv"))
         self.assertFalse(a.check_url("https://other.org/x.csv"))

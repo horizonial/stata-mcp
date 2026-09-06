@@ -126,7 +126,10 @@ class DataPathAuditorLocalTests(unittest.TestCase):
 
 class DataPathAuditorUrlTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.aud = DataPathAuditor(allowed_dirs=[], enable_url_guard=True)
+        # 关 DNS 解析：本类测纯字符串规则，保持 hermetic/离线可跑
+        self.aud = DataPathAuditor(
+            allowed_dirs=[], enable_url_guard=True, enable_dns_resolve=False
+        )
 
     def test_https_allowed_without_userinfo_and_ip(self) -> None:
         self.assertTrue(self.aud.check_url("https://example.com/data/file.dta"))
