@@ -404,3 +404,13 @@ SetInformationJobObject 静默失败（kill-on-close 不生效）。
 
 **注**：跨服务器重启的持久日志归 agent 台账层（MCP 内做内存级即可）。全量 92 测试通过。
 
+## 27. P16 安全审计修复（2026-09-03）
+
+逐条核验外部审计的 6 个发现并修复（104 测试通过，含 12 个审计回归）：
+1. **background 绕过 restricted**（P1）：restricted 校验从"background 分支之后"提前到"之前"，后台 shell 同样拦截。
+2. **session_id 未路由**（P1）：make_context 注入 manager + session_id，`_resolve_session` 真按 session_id 从 manager 路由（白名单 `^[A-Za-z0-9_-]{1,64}$`）。实测两会话隔离正确。
+3. **启动失败干等 300s**（P1）：加 **worker ready 握手**（worker init 完发 ready），Session `_await_ready` 用 `_START_TIMEOUT=60s` 判启动失败（error_kind=start_failed），不再等命令超时。实测首执行含握手 0.6s。
+4. **restrict 绕过**（分号/无引号路径）：解析重写——按换行+分号拆命令段、文件路径无引号也审计、危险命令整句词边界扫描（不误伤 `display "shell"`）。
+5. **后台结果丢结构化/provenance**（P2）：`enrich_structured` 抽成 run/task_status 共用，后台任务现在返回 structured + provenance。
+6. **URL 守卫非完整 SSRF**（P2）：补拒 localhost/127.x/*.local/云元数据域名；DNS rebinding 等仍属已知边界（需解析后校验，文档已注）。
+

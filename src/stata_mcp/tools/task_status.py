@@ -66,12 +66,18 @@ def stata_task_status(arguments: dict, ctx=None) -> Envelope:
             meta={"tool": "stata_task_status", "job_id": job_id, "status": status},
         )
 
-    # DONE：附结果文本与 rc
+    # DONE：附结果文本 + rc + 结构化 + provenance（P16 修复：后台结果此前丢结构化）
     result = task.get("result")
+    code = task.get("code", "")
     text = strip_smcl(result.text) if result else ""
+    structured = None
+    if result is not None and getattr(result, "structured", None):
+        from .run import enrich_structured
+
+        structured = enrich_structured(result.structured, code, result)
     return Envelope(
         text=text or "(task finished with empty output)",
-        structured=None,
+        structured=structured,
         rc=result.rc if result else 0,
         error_class=None,
         graphs=[],

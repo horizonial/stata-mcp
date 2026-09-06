@@ -36,7 +36,7 @@ class TaskRunner:
         """提交一段代码后台执行，立即返回 job_id。"""
         job_id = uuid.uuid4().hex[:12]
         with self._lock:
-            self._tasks[job_id] = {"status": RUNNING, "result": None}
+            self._tasks[job_id] = {"status": RUNNING, "result": None, "code": code}
         threading.Thread(
             target=self._run, args=(job_id, code), daemon=True
         ).start()
@@ -46,7 +46,7 @@ class TaskRunner:
         try:
             result = self._session.execute(code)
             with self._lock:
-                self._tasks[job_id] = {"status": DONE, "result": result}
+                self._tasks[job_id] = {"status": DONE, "result": result, "code": code}
         except Exception as exc:  # 引擎层异常（极少数逃过 capture 的）
             with self._lock:
                 self._tasks[job_id] = {

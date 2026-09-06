@@ -101,6 +101,10 @@ def worker_main(request_q, response_q, break_q, parent_pid: int | None = None) -
     _data_load_cmd: str | None = None
     _exec_seq = 0
 
+    # 启动握手（P16 #3）：引擎 init 完成即发 ready。init 抛异常 → 本进程退出、
+    # 永不发 ready → Session 端短超时判"启动失败"，不再干等 300s。
+    response_q.put({"id": 0, "type": "ready"})
+
     if parent_pid:
         if os.environ.get("STATAMCP_DEBUG"):
             print(f"[worker] starting watchdog for parent {parent_pid}", file=sys.__stderr__)

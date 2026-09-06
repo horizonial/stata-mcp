@@ -87,5 +87,78 @@ class RestrictTests(unittest.TestCase):
         self.assertIn("shell", reason)
 
 
+class AuditRegressionTests(unittest.TestCase):
+    """P16 审计修复回归测试（分号/无引号绕过、background 绕过、localhost SSRF）。"""
+
+    def test_semicolon_hides_shell_in_middle_of_line(self):
+        # 审计#4：`use x; shell rm` 分号藏命令——必须拦
+        ok, _ = check_dangerous('use "auto.dta"; shell rm -rf /')
+        self.assertFalse(ok)
+
+    def test_semicolon_after_capture_prefix(self):
+        ok, _ = check_dangerous("capture noisily use x; winexec notepad")
+        self.assertFalse(ok)
+
+    def test_shell_as_midword_not_false_positive(self):
+        # 不把正常文本/命令里的子串当 shell（词边界要求）
+        ok, _ = check_dangerous('display "shell is a word here"')
+        self.assertTrue(ok)
+
+    def test_unquoted_outside_path_blocked(self):
+        # 审计#4：无引号路径 `use C:\evil.dta` 也要审计
+        outside = os.path.join(tempfile.gettempdir(), "evil.dta")
+        ok, _ = check_file_paths(f"use {outside}", _auditor())
+        self.assertFalse(ok)
+
+    def test_unquoted_relative_in_cwd_allowed(self):
+        ok, _ = check_file_paths("use auto.dta", _auditor())
+        self.assertTrue(ok)
+
+    def test_background_restricted_blocks_shell(self):
+        # 审计#1：background=True 提交 shell，restricted 必须拦截（不触引擎）
+        from stata_mcp.tools.run import stata_run
+
+        env = stata_run({"code": "shell del x", "background": True, "restricted": True}, None)
+        self.assertEqual(env.rc, 1)
+        self.assertIn("blocked", env.text)
+
+    def test_background_restricted_allows_normal(self):
+        from stata_mcp.tools.run import stata_run
+
+        # 正常命令走后台提交（不执行，仅验证没被误拦到 error）
+        env = stata_run({"code": "display 1", "background": True, "restricted": True}, None)
+        self.assertNotEqual(env.text, "")  # 未被拦
+        self.assertIn("background", env.text)
+
+
+class SsrfAuditTests(unittest.TestCase):
+    """审计#6：URL 守卫补 localhost/内网域名。"""
+
+    def test_localhost_https_blocked(self):
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        self.assertFalse(a.check_url("https://localhost:4000/x.csv"))
+        self.assertFalse(a.check_url("https://127.0.0.1/x.dta"))
+
+    def test_local_domain_blocked(self):
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        self.assertFalse(a.check_url("https://router.local/secret"))
+
+    def test_cloud_metadata_blocked(self):
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        self.assertFalse(a.check_url("https://metadata.google.internal/computeMetadata/v1/"))
+
+    def test_public_https_without_whitelist_allowed(self):
+        a = DataPathAuditor(allowed_dirs=[os.getcwd()], enable_url_guard=True)
+        self.assertTrue(a.check_url("https://stats.oecd.org/data.csv"))
+
+    def test_whitelist_still_respected(self):
+        a = DataPathAuditor(
+            allowed_dirs=[os.getcwd()], enable_url_guard=True,
+            allowed_hosts=["example.com"],
+        )
+        self.assertTrue(a.check_url("https://data.example.com/x.csv"))
+        self.assertFalse(a.check_url("https://other.org/x.csv"))
+
+
 if __name__ == "__main__":
     unittest.main()

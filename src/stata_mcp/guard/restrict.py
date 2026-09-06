@@ -30,15 +30,30 @@ _PREFIX_RE = re.compile(r"^(capture|noisily|quietly|qui)\s+", re.IGNORECASE)
 # by varlist: / bysort varlist: 前缀（varlist 后必须跟冒号）
 _BY_RE = re.compile(r"^by(?:sort)?\s+([^:]+):\s*", re.IGNORECASE)
 
-# 带文件路径的命令：命令名 ... "path"
-_FILE_PATH_RE = re.compile(
-    r'(?:(?:^|\s)(?:use|import\s+(?:delimited|excel|spss|sasxport|sav|dbase|haver|infix|infile)|save|cd|append|merge)\s+)"([^"]+)"',
-    re.IGNORECASE,
+# 危险命令词：整句内出现即拦（不只看行首——堵分号/`use x; shell` 绕过，审计 #4）
+_DANGEROUS_RE = re.compile(
+    r"(^|[\s;])(shell|winexec|erase|rm)(\s|$)", re.IGNORECASE
 )
+
+# 带文件路径的命令（首词判断 + 需判断的 import 子命令）
+_FILE_COMMANDS = {
+    "use", "save", "cd", "append", "merge",
+    "import", "insheet", "infile", "copy",
+}
+# import 是两词：import delimited/excel/... 才算文件命令
+_IMPORT_KINDS = {
+    "delimited", "excel", "spss", "sasxport", "sav", "dbase", "haver",
+    "infix", "infile", "fred", "freduse", "hdf5", "fixed",
+}
+
+# 引号包裹的文件路径（可含空格）
+_QUOTED = re.compile(r'"([^"]+)"')
+# 无引号路径 token（不含引号/空白/注释/续行）
+_UNQUOTED = re.compile(r'^(\S+)$')
 
 
 def _strip_comment(line: str) -> str:
-    """去掉行内注释（// 与 /* */ 简化处理；* 行首注释由 _command_word 返回空处理）。"""
+    """去掉行内注释（// 与 /* */；行首 * 注释由拆段跳过）。"""
     line = line.split("//", 1)[0]
     line = line.split("/*", 1)[0]
     return line
@@ -57,53 +72,86 @@ def _strip_prefix(line: str) -> str:
     return line
 
 
-def _command_word(line: str) -> str:
-    """提取命令首词（小写）；空行/纯注释行返回 ""。"""
-    line = line.strip()
-    if not line or line.startswith("*"):
-        return ""
-    line = _strip_comment(line).strip()
-    if not line:
-        return ""
-    line = _strip_prefix(line)
-    m = re.match(r"^(\S+)", line)
-    return m.group(1).lower() if m else ""
+def _split_statements(code: str) -> list[str]:
+    """把代码拆成"命令段"列表：按换行，行内再按 ``;`` 拆（防 `use x; shell`）。
 
-
-def check_dangerous(code: str) -> tuple[bool, str]:
-    """检测 shell 逃逸 / 文件删除。返回 (allowed, reason)。"""
+    Stata 默认以换行分隔命令；``;`` 仅在 ``#delimit ;`` 下分隔，但保守起见
+    一律拆——多拆只会多检，不会漏检（审计 #4）。
+    """
+    out: list[str] = []
     for raw_line in code.splitlines():
         line = _strip_comment(raw_line).strip()
         if not line or line.startswith("*"):
             continue
-        # shell 逃逸：! 在行首（剥前缀后）
-        stripped = _strip_prefix(line).strip()
-        if stripped.startswith("!"):
+        for seg in line.split(";"):
+            seg = _strip_prefix(seg.strip())
+            if seg:
+                out.append(seg)
+    return out
+
+
+def _first_token(stmt: str) -> str:
+    m = re.match(r"^(\S+)", stmt)
+    return m.group(1).lower() if m else ""
+
+
+def check_dangerous(code: str) -> tuple[bool, str]:
+    """检测 shell 逃逸 / 文件删除（整句扫描，非仅行首）。返回 (allowed, reason)。"""
+    for stmt in _split_statements(code):
+        # shell 逃逸：! 在句首
+        if stmt.startswith("!"):
             return False, "shell escape (!) is blocked in restricted mode"
-        cmd = _command_word(raw_line)
-        if cmd in _DANGEROUS_COMMANDS:
-            return False, f"command '{cmd}' is blocked in restricted mode"
+        if _DANGEROUS_RE.search(stmt):
+            return False, "shell/winexec/erase/rm are blocked in restricted mode"
+    return True, ""
+
+
+def _audit_one_path(path: str, auditor: DataPathAuditor) -> tuple[bool, str]:
+    path = path.strip().strip('"')
+    if not path:
+        return True, ""
+    if "://" in path:
+        if not auditor.check_url(path):
+            return False, f"URL '{path}' is not allowed in restricted mode"
+    else:
+        if not auditor.check_local_path(path):
+            return False, (
+                f"file path '{path}' is outside allowed data directories "
+                "in restricted mode"
+            )
     return True, ""
 
 
 def check_file_paths(code: str, auditor: DataPathAuditor) -> tuple[bool, str]:
-    """检测带文件路径命令的路径是否越权。返回 (allowed, reason)。"""
-    for raw_line in code.splitlines():
-        line = _strip_comment(raw_line)
-        if not line or line.startswith("*"):
+    """检测文件类命令的路径是否越权（带引号或无引号都审计，审计 #4）。"""
+    for stmt in _split_statements(code):
+        cmd = _first_token(stmt)
+        rest = stmt[len(cmd):].strip()
+        if cmd not in _FILE_COMMANDS and cmd != "import":
             continue
-        for m in _FILE_PATH_RE.finditer(line):
-            path = m.group(1)
-            # 相对路径/URL 判断交给 auditor；本地路径越权即拒
-            if "://" in path:
-                if not auditor.check_url(path):
-                    return False, f"URL '{path}' is not allowed in restricted mode"
-            else:
-                if not auditor.check_local_path(path):
-                    return False, (
-                        f"file path '{path}' is outside allowed data directories "
-                        "in restricted mode"
-                    )
+        if cmd == "import":
+            # import <kind> <path>：kind 必须是已知文件格式
+            if not rest:
+                continue
+            kind = _first_token(rest)
+            if kind not in _IMPORT_KINDS:
+                continue  # import 非文件（如 import idcode）不管
+            rest = rest[len(kind):].strip()
+        if not rest:
+            continue
+        # 取第一个参数：优先引号路径，否则无引号路径 token
+        m = _QUOTED.match(rest)
+        if m:
+            ok, reason = _audit_one_path(m.group(1), auditor)
+            if not ok:
+                return False, reason
+            continue
+        # 无引号：整句非空时的首 token 当路径候选（use auto.dta / save out）
+        cand = _first_token(rest)
+        if cand and _UNQUOTED.match(cand):
+            ok, reason = _audit_one_path(cand, auditor)
+            if not ok:
+                return False, reason
     return True, ""
 
 

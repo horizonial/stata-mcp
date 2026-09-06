@@ -22,6 +22,9 @@ from .stata.worker import worker_main
 _DEFAULT_EXEC_TIMEOUT = 300.0
 _BREAK_GRACE = 3.0
 _DEFAULT_IDLE_TIMEOUT = 600.0
+# 启动握手超时（P16 #3）：worker 点火 + 引擎 init/license 的等待上限。
+# 超过即判"启动失败"，快速返回，不干等 _DEFAULT_EXEC_TIMEOUT。
+_START_TIMEOUT = 60.0
 
 
 @dataclass
@@ -63,6 +66,8 @@ class Session:
         # 日志才保得住。环形上限 _JOURNAL_MAX，reset 时随结果返回供 agent 重放。
         self._journal: list[dict] = []
         self._journal_max = 500
+        # 启动握手状态（P16 #3）：worker 发 ready 前不认为可执行
+        self._ready_ok = False
 
     # ---- 生命周期 -----------------------------------------------------------
 
@@ -115,6 +120,7 @@ class Session:
             self._proc.join(timeout=2)
         self._proc = None
         self._request_q = self._response_q = self._break_q = None
+        self._ready_ok = False  # 进程换了，ready 状态必须重置（P16 #3）
         if self._job is not None:
             try:
                 self._job.close()  # 关闭句柄（此时 worker 已终止，无副作用）
@@ -149,6 +155,13 @@ class Session:
     def execute(self, code: str, timeout: float = _DEFAULT_EXEC_TIMEOUT) -> SessionResult:
         with self._lock:
             reset = self._ensure_started()
+            # P16 #3：启动握手——worker 点火失败/超时则快速返回，不干等命令超时。
+            if not self._await_ready():
+                return self._make_reset(
+                    f"(session failed to start within {_START_TIMEOUT}s "
+                    "(Stata engine init/license problem)); session reset",
+                    "start_failed",
+                )
             self._last_used = time.time()
             self._msg_id += 1
             mid = self._msg_id
@@ -208,6 +221,28 @@ class Session:
             text=text, rc=601, reset=True, error_kind=kind, replay=self.journal()
         )
 
+    def _await_ready(self) -> bool:
+        """启动握手（P16 #3）：等 worker 发 ready；短超时 _START_TIMEOUT。
+
+        worker 引擎 init 失败/卡死时不发 ready → 这里超时快速判启动失败，
+        不再干等 _DEFAULT_EXEC_TIMEOUT。失败即清理，返回 False。
+        """
+        if self._ready_ok:
+            return True
+        try:
+            msg = self._response_q.get(timeout=_START_TIMEOUT)
+        except queue.Empty:
+            self._cleanup()
+            return False
+        except (EOFError, OSError, ValueError):
+            self._cleanup()
+            return False
+        if msg and msg.get("type") == "ready":
+            self._ready_ok = True
+            return True
+        self._cleanup()
+        return False
+
     def _log(self, seq: int, code: str, rc: int) -> None:
         """追加一条命令日志（环形，上限 _journal_max）。"""
         self._journal.append({"seq": seq, "cmd": code, "rc": rc})
@@ -232,6 +267,8 @@ class Session:
         """读当前数据集前 n 行（P1b data_rows），worker 内完成。"""
         with self._lock:
             self._ensure_started()
+            if not self._await_ready():
+                return {"reset": True, "start_failed": True}
             self._last_used = time.time()
             self._msg_id += 1
             mid = self._msg_id
@@ -253,6 +290,8 @@ class Session:
         """只读当前会话状态（e()/r()/shape），由 worker 内完成结构化读取。"""
         with self._lock:
             reset = self._ensure_started()
+            if not self._await_ready():
+                return {"reset": True, "start_failed": True}
             self._last_used = time.time()
             self._msg_id += 1
             mid = self._msg_id

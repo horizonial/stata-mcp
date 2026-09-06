@@ -128,6 +128,15 @@ class DataPathAuditor:
             # 拒绝 IP 字面量：SSRF 的核心入口是"让服务器去连内网 IP"
             if _is_ip_literal(host):
                 return False
+            # 拒绝 localhost / 本机 / 内网域（P16：补 SSRF 常见绕过）
+            #   localhost、127.x、[::1]、*.local（mDNS 内网）、常见云元数据域名。
+            if host == "localhost" or host.endswith(".local"):
+                return False
+            if host.startswith("127.") or host == "::1":
+                return False
+            if host in ("metadata.google.internal", "metadata.azure.internal",
+                        "169.254.169.254.nip.io", "metadata"):
+                return False
             # 可选域名白名单：host 精确匹配或以 .allowed 结尾（子域匹配）
             if self._allowed_hosts:
                 if not any(
