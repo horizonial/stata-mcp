@@ -274,17 +274,41 @@ def check_file_paths(code: str, auditor: DataPathAuditor) -> tuple[bool, str]:
     return True, ""
 
 
+def _has_file_write_subcommand(verb: str, toks: list[str], stmt: str) -> tuple[bool, str]:
+    """verb 白名单不等于文件系统白名单：某些白名单命令的子命令会写外部文件。
+
+    P16e #1：estimates/est save|use、label save、table export(...)/dofile 都写文件，
+    这些路径不经 _FILE_COMMANDS 审计 → 直接整句拒绝（restricted 下不允许它们写盘）。
+    返回 (is_file_write, reason)。
+    """
+    sub = _first_token(toks[1]) if len(toks) > 1 else ""
+    low_stmt = stmt.lower()
+    if verb in ("estimates", "est") and sub in ("save", "use"):
+        return True, f"'{verb} {sub}' writes/reads estimation files; not allowed in restricted mode"
+    if verb == "label" and sub == "save":
+        return True, "label save writes a do-file; not allowed in restricted mode"
+    if verb == "table" and ("export(" in low_stmt or "dofile" in low_stmt or sub == "export"):
+        return True, "table export/dofile writes a file; not allowed in restricted mode"
+    return False, ""
+
+
 def check_commands(code: str) -> tuple[bool, str]:
     """命令白名单 fail-closed（P16c #2）：不在 _ALLOWED_VERBS 的命令一律拒绝。
 
     import/export 等按子命令判断（import excel 合法、python:/mata: 等非法）。
     这使得 unknown 命令**默认拒绝**（此前黑名单是未知放行——哲学差别）。
+    P16e #1：白名单内也有子命令会写文件（estimates/label/table），逐句拦。
     """
     for stmt in _split_statements(code):
         toks = _tokens(stmt)
         if not toks:
             continue
         verb = _first_token(toks[0])
+        # 白名单内子命令的文件写入
+        if verb in ("estimates", "est", "label", "table"):
+            is_write, reason = _has_file_write_subcommand(verb, toks, stmt)
+            if is_write:
+                return False, reason
         # 两词/子命令形态
         if verb in ("import", "export", "graph", "putexcel", "outfile", "filefilter"):
             if verb in ("import", "export") and len(toks) > 1:

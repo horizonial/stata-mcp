@@ -9,16 +9,12 @@ from . import register
 _STATA_TASK_STATUS_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "session_id": {
+        "job_id": {
             "type": "string",
-            "description": "会话标识；省略用 'default'。",
-        },
-                "job_id": {
-            "type": "string",
-            "description": "stata_run(background=True) 返回的 job_id。",
+            "description": "stata_run(background=True) 返回的全局 job_id（任务表全局查询，不属某会话）。",
         }
     },
-            "required": ["job_id"],
+    "required": ["job_id"],
 }
 
 

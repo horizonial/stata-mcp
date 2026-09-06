@@ -226,6 +226,99 @@ class RestrictDeepBypassTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TaskStatusSessionTests(unittest.TestCase):
+    """P16e #2：task_status 是全局 job 查询，schema 不含 session_id。"""
+
+    def test_task_status_schema_has_no_session_id(self):
+        from stata_mcp.tools import TOOLS
+
+        schema = TOOLS["stata_task_status"].input_schema
+        self.assertNotIn("session_id", schema)
+        self.assertNotIn("session_id", schema.get("properties", {}))
+
+    def test_unknown_job_errors(self):
+        from stata_mcp.tools import TOOLS
+
+        env = TOOLS["stata_task_status"].handler({"job_id": "doesnotexist"}, None)
+        self.assertEqual(env.rc, 1)
+        self.assertIn("unknown job_id", env.text)
+
+
+class SingletonThreadTests(unittest.TestCase):
+    """P16e #4：并发 get_manager/get_runner 必须返回同一实例。"""
+
+    def test_concurrent_get_manager_same_instance(self):
+        import threading
+
+        from stata_mcp import session as sm
+        sm._manager = None  # 重置强制懒初始化
+        got = []
+        lock = threading.Lock()
+
+        def work():
+            m = sm.get_manager()
+            with lock:
+                got.append(m)
+
+        ts = [threading.Thread(target=work) for _ in range(50)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertTrue(all(g is got[0] for g in got))
+
+    def test_concurrent_get_runner_same_instance(self):
+        import threading
+
+        from stata_mcp import tasks as tk
+        tk._runner = None
+        got = []
+        lock = threading.Lock()
+
+        def work():
+            r = tk.get_runner()
+            with lock:
+                got.append(r)
+
+        ts = [threading.Thread(target=work) for _ in range(50)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertTrue(all(g is got[0] for g in got))
+
+
+class TaskCapacityConcurrencyTests(unittest.TestCase):
+    """P16e #3：MAX_ACTIVE=1 时并发提交，只有一个能登记。"""
+
+    def test_concurrent_submit_respects_active_cap(self):
+        import threading
+        import time
+
+        import stata_mcp.tasks as tk
+        old = tk._MAX_ACTIVE
+        tk._MAX_ACTIVE = 1
+        try:
+            runner = tk.TaskRunner()
+
+            class _StubSession:
+                def execute(self, code, timeout=None):
+                    time.sleep(2)  # 占着 active 窗口
+                    return None
+
+            # 手动预置一个 running 任务占满配额
+            with runner._lock:
+                runner._tasks["occupy"] = {
+                    "status": tk.RUNNING, "result": None, "code": "", "session": _StubSession(),
+                    "submitted": time.time(),
+                }
+            try:
+                runner.submit("x", None)
+                self.fail("应抛 TaskCapacityExceeded")
+            except tk.TaskCapacityExceeded:
+                pass
+        finally:
+            tk._MAX_ACTIVE = old
+            with runner._lock:
+                runner._tasks.clear()
+
+
 class SchemaSessionIdTests(unittest.TestCase):
     """P16d：声明了 session_id 的工具，schema 必须把它放在 properties 内（非顶层）。"""
 
@@ -326,6 +419,46 @@ class WhitelistFailClosedTests(unittest.TestCase):
 
     def test_xtset_xtreg_allowed(self):
         ok, _ = restrict("xtset id t\nxtreg y x, fe", self._aud())
+        self.assertTrue(ok)
+
+
+class SubcommandFileWriteTests(unittest.TestCase):
+    """P16e #1：白名单命令的子命令也会写文件（estimates/label/table）——必须拦。"""
+
+    def _aud(self):
+        return DataPathAuditor(allowed_dirs=[os.getcwd()])
+
+    def test_estimates_save_blocked(self):
+        ok, _ = restrict('estimates save "C:\\outside.ster"', self._aud())
+        self.assertFalse(ok)
+        ok2, _ = restrict('est save "C:\\outside.ster"', self._aud())
+        self.assertFalse(ok2)
+
+    def test_estimates_use_blocked(self):
+        ok, _ = restrict('estimates use "C:\\outside.ster"', self._aud())
+        self.assertFalse(ok)
+
+    def test_label_save_blocked(self):
+        ok, _ = restrict('label save mylbl using "C:\\outside.do"', self._aud())
+        self.assertFalse(ok)
+
+    def test_table_export_blocked(self):
+        ok, _ = restrict('table foreign, export("C:\\outside.html")', self._aud())
+        self.assertFalse(ok)
+
+    def test_table_dofile_blocked(self):
+        ok, _ = restrict("table foreign, dofile", self._aud())
+        self.assertFalse(ok)
+
+    def test_quietly_capture_prefix_still_blocked(self):
+        ok, _ = restrict('quietly estimates save "C:\\x.ster"', self._aud())
+        self.assertFalse(ok)
+        ok2, _ = restrict('capture noisily label save z using "C:\\x.do"', self._aud())
+        self.assertFalse(ok2)
+
+    def test_legit_estimates_and_label_still_allowed(self):
+        # 非文件操作的 estimates/label 用法应保留
+        ok, _ = restrict("regress mpg weight\nestimates store m1\nlabel variable mpg car_mpg", self._aud())
         self.assertTrue(ok)
 
 

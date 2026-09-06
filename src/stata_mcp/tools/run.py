@@ -217,9 +217,21 @@ def stata_run(arguments: dict, ctx=None) -> Envelope:
     if background:
         # 后台执行：立即返回 job_id，命令在独立线程跑（仍受会话串行锁约束）。
         # P16b #1：后台任务可指定 session_id（不固定 default）。
-        from ..tasks import get_runner
+        from ..session import SessionLimitExceeded
+        from ..tasks import TaskCapacityExceeded, get_runner
 
-        job_id = get_runner().submit(code, sid)
+        try:
+            job_id = get_runner().submit(code, sid)
+        except (TaskCapacityExceeded, SessionLimitExceeded) as exc:
+            return Envelope(
+                text=f"error: {exc}",
+                structured=None,
+                rc=1,
+                error_class=None,
+                graphs=[],
+                meta={"tool": "stata_run", "background": True},
+                error={"kind": "capacity_exceeded", "message": str(exc)},
+            )
         return Envelope(
             text=f"submitted background job {job_id}; poll with stata_task_status, "
             "interrupt with stata_break",
@@ -230,9 +242,18 @@ def stata_run(arguments: dict, ctx=None) -> Envelope:
             meta={"tool": "stata_run", "job_id": job_id, "background": True},
         )
 
+    from ..session import SessionLimitExceeded
+
     try:
         session = _resolve_session(ctx, sid)  # sid 来自上面 _session_arg（已校验）
-    except Exception as exc:  # SessionLimitExceeded 等：友好返回而非裸异常
+    except SessionLimitExceeded as exc:
+        return Envelope(
+            text=f"error: {exc}",
+            structured=None, rc=1, error_class=None, graphs=[],
+            meta={"tool": "stata_run"},
+            error={"kind": "capacity_exceeded", "message": str(exc)},
+        )
+    except Exception as exc:  # 其它：友好返回而非裸异常
         return Envelope(
             text=f"error: {exc}",
             structured=None,

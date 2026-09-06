@@ -411,12 +411,17 @@ class SessionManager:
             self._sessions.clear()
 
 
-# 进程内单例（与 get_backend 单例对齐）
+# 进程内单例
 _manager: SessionManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_manager() -> SessionManager:
+    """返回单例 SessionManager（P16e #4：懒初始化加锁，防并发建多个 manager
+    把会话分裂、绕过 max_sessions）。"""
     global _manager
     if _manager is None:
-        _manager = SessionManager()
+        with _manager_lock:
+            if _manager is None:
+                _manager = SessionManager()
     return _manager

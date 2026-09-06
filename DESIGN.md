@@ -439,3 +439,13 @@ codex 逐行审出 P16c 的 5 个实现缺陷，全修：
 4. **task_status ERROR 提前返回**：删掉 ERROR 分支提前 return，DONE/ERROR 走同一 formatter（补 error/error_kind/error_class/elapsed/replay）。
 5. 发布收尾：`enable_dns_resolve` 接入 `config[security].enable_url_dns_resolve` + env `STATAMCP_URL_DNS_RESOLVE`（load_data/run 的 auditor 都传）；server instructions 文案改为多会话模型；`__version__` 0.2.0→1.0.0 与 pyproject 统一。DNS rebinding 静态 guard 局限已注（需连接层/HTTP 代理二次校验）。
 
+
+## 27e. P16e 第四轮收尾（2026-09-03，138→150 测试）
+
+codex 第四轮审出 4 项，全修：
+1. **restricted verb 白名单 ≠ 文件系统白名单**：白名单内 `estimates/est save·use`、`label save`、`table export(...)/dofile` 仍会写外部文件，路径不经 _FILE_COMMANDS 审计 → 整句拒绝（含 quietly/capture 前缀回归）；非文件操作（estimates store、label variable）保留。
+2. **task_status 忽略 session_id**：改为全局 job 查询，schema 删除 session_id（handler 本只读 job_id）。
+3. **TaskRunner active 竞态**：prune + active/total 检查 + 登记全部移入**同一锁域**；run.py 捕获 TaskCapacityExceeded/SessionLimitExceeded → 稳定 `error.kind="capacity_exceeded"`。
+4. **单例懒初始化竞态**：get_manager()/get_runner() 加模块级初始化锁；并发测试（50 线程）必须返回同一实例。
+
+**原则收尾（认可审计者判断）**：DNS rebinding / redirect 属连接层边界，静态 guard 只当前置过滤；真正不可信场景应改为主进程安全下载/代理，不再靠静态 Stata 文本解析补洞。test count 133→138→150。

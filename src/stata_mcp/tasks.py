@@ -48,15 +48,18 @@ class TaskRunner:
         self._lock = threading.Lock()
 
     def submit(self, code: str, session_id: str | None = None) -> str:
-        """提交后台执行，返回 job_id。session_id 缺省用 default（惰性解析）。"""
-        # 运行中(含排队)任务上限
-        active = sum(1 for t in self._tasks.values() if t.get("status") == RUNNING)
-        if active >= _MAX_ACTIVE:
-            raise TaskCapacityExceeded(
-                f"too many active background tasks ({active} >= {_MAX_ACTIVE})"
-            )
-        self._prune()
+        """提交后台执行，返回 job_id。session_id 缺省用 default（惰性解析）。
+
+        P16e #3：prune + active/total 上限检查 + 登记 在**同一个锁域**内完成，
+        消除并发提交时 active 计数竞态。
+        """
         with self._lock:
+            self._prune_locked()
+            active = sum(1 for t in self._tasks.values() if t.get("status") == RUNNING)
+            if active >= _MAX_ACTIVE:
+                raise TaskCapacityExceeded(
+                    f"too many active background tasks ({active} >= {_MAX_ACTIVE})"
+                )
             if len(self._tasks) >= _MAX_TOTAL:
                 raise TaskCapacityExceeded(
                     f"task table full ({_MAX_TOTAL}); retry after TTL cleanup"
@@ -98,41 +101,45 @@ class TaskRunner:
                     "finished": time.time(), "elapsed_ms": round((time.time() - t0) * 1000, 3),
                 }
 
-    def _prune(self) -> None:
-        """清理过期完成记录 + 超出 _MAX_KEPT/_MAX_TOTAL。submit/status/snapshot 都调用。"""
+    def _prune_locked(self) -> None:
+        """清理过期/超量记录。**调用方须已持有 self._lock**（P16e #3 单锁域）。"""
         now = time.time()
-        with self._lock:
-            for jid in list(self._tasks):
-                t = self._tasks[jid]
-                if t.get("status") != RUNNING and now - t.get("finished", now) > _DONE_TTL:
-                    del self._tasks[jid]
-            done = [jid for jid, t in self._tasks.items() if t.get("status") != RUNNING]
-            if len(done) > _MAX_KEPT:
-                for jid in sorted(done, key=lambda j: self._tasks[j].get("finished", 0))[
-                    : len(done) - _MAX_KEPT
-                ]:
-                    del self._tasks[jid]
+        for jid in list(self._tasks):
+            t = self._tasks[jid]
+            if t.get("status") != RUNNING and now - t.get("finished", now) > _DONE_TTL:
+                del self._tasks[jid]
+        done = [jid for jid, t in self._tasks.items() if t.get("status") != RUNNING]
+        if len(done) > _MAX_KEPT:
+            for jid in sorted(done, key=lambda j: self._tasks[j].get("finished", 0))[
+                : len(done) - _MAX_KEPT
+            ]:
+                del self._tasks[jid]
 
     def status(self, job_id: str) -> dict | None:
         """查任务状态；未知 job_id 返回 None。读前先清理过期（P16d）。"""
-        self._prune()
         with self._lock:
+            self._prune_locked()
             task = self._tasks.get(job_id)
             return dict(task) if task else None
 
     def snapshot(self) -> dict[str, str]:
         """所有任务的状态快照（job_id -> status），供 list 用。读前先清理过期。"""
-        self._prune()
         with self._lock:
+            self._prune_locked()
             return {jid: t["status"] for jid, t in self._tasks.items()}
 
 
-# 进程内单例（与 get_backend 单例对齐）
+# 进程内单例（与 get_manager 单例对齐）
 _runner: TaskRunner | None = None
+_runner_lock = threading.Lock()
 
 
 def get_runner() -> TaskRunner:
+    """返回单例 TaskRunner（P16e #4：懒初始化加锁，防并发建多个 runner 导致
+    job 登记到旧实例、status 查不到）。"""
     global _runner
     if _runner is None:
-        _runner = TaskRunner()
+        with _runner_lock:
+            if _runner is None:
+                _runner = TaskRunner()
     return _runner
