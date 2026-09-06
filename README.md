@@ -75,7 +75,7 @@ tools/           10 个工具，@register 注册
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -t .      # 92 用例（mock，无 Stata 也能跑）
+python -m unittest discover -s tests -t .      # 162 用例（mock + 真引擎回归）
 python -m unittest tests.test_real_stata -v     # 4 用例（需本机 Stata，正确性回归台）
 ```
 

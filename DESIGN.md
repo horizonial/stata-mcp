@@ -478,3 +478,15 @@ varlist-using 语法让 `_path_token_indices` 误把 varlist 当路径、漏审�
 - `describe/des varlist using file` 走 using 审计（内存 `describe varlist` 仍允许）。
 
 restricted 维持"非沙箱"定性：仍只用于代码基本可信场景；对不可信内容用工具而非自由 code。
+
+## 27h. P16h 第七轮（2026-09-03，162→167 测试）——误伤修复
+
+审计发现 restricted 误伤：
+- `merge 1:1 id using "auto.dta"` 被拒；
+- `import excel "data.xlsx", cellrange(A1:B2)` 被拒。
+
+根因：path-like 判定把任意含 `:` 的 token 当路径，误判 merge 键 `1:1` 与单元格区间 `A1:B2`。
+修复：**冒号不再是 path-like 特征**（merge 键/区间冒号是语法非路径）；真正的冒号路径
+（`saveold C:secret`/`C:\x`）由"直接文件动词首实参 / copy 双实参"捕获后，再经
+"无引号含冒号即拒"规则兜底。补 5 个回归：merge 1:1 / m:1 放行、cellrange 放行、
+merge using outside 仍拦、saveold C:secret 仍拦。README 测试数同步 162。

@@ -239,10 +239,13 @@ def _path_token_indices(verb: str, payload: list[str]) -> list[int]:
     for i, tok in enumerate(payload):
         if tok.startswith('"') or low[i] in _KEYWORDS:
             continue
-        if any(ch in tok for ch in "./\\:") or low[i].endswith(
+        # path-like 裸 token。注意：不含 ':' —— merge 键 `1:1`、`cellrange(A1:B2)`
+        # 里的冒号是语法不是路径（P16h 误伤修复）；真正的冒号路径（如 C:\x）由
+        # 直接文件动词/copy 首实参捕获后，再经"无引号含冒号"拒绝规则兜底。
+        if any(ch in tok for ch in "./\\") or low[i].endswith(
             (".dta", ".csv", ".xlsx", ".do", ".dat", ".txt", ".log", ".gph", ".ster", ".raw")
         ):
-            idxs.append(i)  # path-like 裸 token
+            idxs.append(i)
     if verb in ("save", "saveold", "cd", "type", "copy"):
         real = [i for i, k in enumerate(low) if k not in _KEYWORDS]
         if verb == "copy":

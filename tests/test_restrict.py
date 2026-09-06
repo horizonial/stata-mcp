@@ -255,6 +255,33 @@ class P16gVarlistUsingTests(unittest.TestCase):
         self.assertFalse(restrict("import excel C:\\outside.xlsx", self._aud())[0])
 
 
+class P16hNoFalsePositiveTests(unittest.TestCase):
+    """P16h：不要把 merge 键/单元格区间里的冒号误当路径。"""
+
+    def _aud(self):
+        return DataPathAuditor(allowed_dirs=[os.getcwd()])
+
+    def test_merge_1_1_using_inside_allowed(self):
+        ok, _ = restrict('merge 1:1 id using "auto.dta"', self._aud())
+        self.assertTrue(ok)
+
+    def test_merge_m_1_using_inside_allowed(self):
+        ok, _ = restrict('merge m:1 city using "city.dta"', self._aud())
+        self.assertTrue(ok)
+
+    def test_import_excel_cellrange_allowed(self):
+        ok, _ = restrict('import excel "data.xlsx", cellrange(A1:B2) firstrow', self._aud())
+        self.assertTrue(ok)
+
+    def test_merge_using_outside_still_blocked(self):
+        outside = os.path.join(tempfile.gettempdir(), "auto.dta")
+        self.assertFalse(restrict(f'merge 1:1 id using "{outside}"', self._aud())[0])
+
+    def test_saveold_drive_path_still_blocked(self):
+        # 冒号路径仍由"直接文件动词首实参 + 无引号含冒号拒"兜住
+        self.assertFalse(restrict("saveold C:secret", self._aud())[0])
+
+
 class P16fNestedBypassTests(unittest.TestCase):
     """P16f：frame 前缀/table command()/describe using/lab 别名/网络 import 全要拦。"""
 
