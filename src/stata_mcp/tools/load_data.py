@@ -23,7 +23,12 @@ from ..envelope import Envelope
 from ..guard.data_path import DataPathAuditor
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg, invalid_session_result
+from .run import (
+    _resolve_backend,
+    _session_arg,
+    build_execution_receipt,
+    invalid_session_result,
+)
 
 # 模块级配置缓存：分层配置是进程内静态的，读一次即可（load_config 每次读盘+合并，
 # 多工具共享时不值得每个工具调用都重读）。需要时测试可把本变量置回 None 重新加载。
@@ -213,6 +218,17 @@ def stata_load_data(arguments: dict, ctx=None) -> Envelope:
 
         error_class = classify_error(result.rc, text)
 
+    if result.rc == 0:
+        structured_status = "complete" if structured is not None else "parse_failed"
+    else:
+        structured_status = "not_applicable"
+    execution_receipt = build_execution_receipt(
+        session,
+        result,
+        truncated=False,
+        structured_result_status=structured_status,
+    )
+
     return Envelope(
         text=text,
         structured=structured,
@@ -220,4 +236,5 @@ def stata_load_data(arguments: dict, ctx=None) -> Envelope:
         error_class=error_class,
         graphs=[],
         meta=meta,
+        execution_receipt=execution_receipt,
     )

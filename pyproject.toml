@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stata-mcp"
-version = "1.0.0"
+version = "2.0.0"
 description = "Stata 执行工具服务器（MCP）：进程内嵌 pystata，结构化结果、安全审计、后台任务与中断、图导出"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 # 运行时依赖只允许官方 mcp SDK（不赌第三方框架内部实现）。
 dependencies = ["mcp>=2,<3"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.13,<1"]
 
 [project.scripts]
 stata-mcp = "stata_mcp.server:main"

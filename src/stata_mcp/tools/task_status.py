@@ -17,6 +17,18 @@ _STATA_TASK_STATUS_SCHEMA: dict = {
     "required": ["job_id"],
 }
 
+_EMPTY_COMMAND_FAILURE_HINTS = {
+    601: "file not found",
+    602: "file already exists",
+    603: "file could not be opened",
+}
+
+
+def _command_failure_fallback(rc: int) -> str:
+    hint = _EMPTY_COMMAND_FAILURE_HINTS.get(rc)
+    suffix = f": {hint}" if hint else ""
+    return f"Stata command failed with r({rc}){suffix}; raw output was empty"
+
 
 @register("stata_task_status", _STATA_TASK_STATUS_SCHEMA)
 def stata_task_status(arguments: dict, ctx=None) -> Envelope:
@@ -61,9 +73,11 @@ def stata_task_status(arguments: dict, ctx=None) -> Envelope:
     code = task.get("code", "")
     text = strip_smcl(result.text) if result else task.get("error", "")
     rc = result.rc if result else (1 if status == ERROR else 0)
+    if rc != 0 and not text:
+        text = _command_failure_fallback(rc)
 
     structured = None
-    if result is not None and getattr(result, "structured", None):
+    if result is not None:
         from .run import enrich_structured
 
         structured = enrich_structured(result.structured, code, result)
@@ -93,6 +107,34 @@ def stata_task_status(arguments: dict, ctx=None) -> Envelope:
         cmds = [e.get("cmd") for e in result.replay if e.get("cmd")]
         meta["replay"] = cmds[-30:]
         meta["replay_full"] = len(cmds)
+    metadata = dict(task.get("metadata") or {})
+    artifact_contracts = list(metadata.get("artifact_contracts") or [])
+    if result is not None and artifact_contracts:
+        from .run import _capture_artifact_outputs
+
+        captured_outputs, missing_outputs = _capture_artifact_outputs(
+            artifact_contracts,
+            command_hash=getattr(result, "command_hash", None),
+            operation_attempt_id=metadata.get("operation_attempt_id"),
+        )
+        if captured_outputs:
+            meta["artifact_outputs"] = captured_outputs
+        if missing_outputs:
+            meta["artifact_output_contract_status"] = "missing_required"
+            meta["missing_required_artifact_outputs"] = missing_outputs
+        else:
+            meta["artifact_output_contract_status"] = "complete"
+
+    execution_receipt = None
+    if result is not None:
+        from .run import build_execution_receipt
+
+        execution_receipt = build_execution_receipt(
+            task.get("session"),
+            result,
+            truncated=False,
+            structured_result_status="complete" if structured is not None else None,
+        )
 
     return Envelope(
         text=text or ("(task finished with empty output)" if status == DONE else "error"),
@@ -102,4 +144,5 @@ def stata_task_status(arguments: dict, ctx=None) -> Envelope:
         graphs=[],
         meta=meta,
         error=error,
+        execution_receipt=execution_receipt,
     )

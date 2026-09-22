@@ -19,7 +19,12 @@ from ..envelope import Envelope
 from ..guard.validate import is_valid_identifier
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg, invalid_session_result
+from .run import (
+    _resolve_backend,
+    _session_arg,
+    build_execution_receipt,
+    invalid_session_result,
+)
 
 _FORMATS = ("png", "svg", "pdf")
 
@@ -106,8 +111,8 @@ def stata_export_graph(arguments: dict, ctx=None) -> Envelope:
 
         return invalid_session_result("stata_export_graph", sid_err)
 
-    backend = _resolve_backend(ctx, sid)
-    result = backend.execute(command)
+    session = _resolve_backend(ctx, sid)
+    result = session.execute(command)
     text = strip_smcl(result.text)
 
     structured: dict | None = None
@@ -136,4 +141,14 @@ def stata_export_graph(arguments: dict, ctx=None) -> Envelope:
         graphs=[stata_path] if structured else [],
         meta=meta,
         images=images,
+        execution_receipt=build_execution_receipt(
+            session,
+            result,
+            truncated=False,
+            structured_result_status=(
+                "complete"
+                if structured is not None
+                else ("parse_failed" if result.rc == 0 else "not_applicable")
+            ),
+        ),
     )

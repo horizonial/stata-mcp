@@ -5,11 +5,11 @@
 
 [GitHub](https://github.com/horizonial/stata-mcp) · MIT License · Python 3.12 · Stata 17+ (pystata)
 
-It embeds pystata (Stata 17+) in-process and exposes Stata as machine-readable MCP tools: run code, load data, inspect data, read structured results, export graphs, background long jobs with interruption, data preview and command help.
-它进程内嵌 pystata，把 Stata 暴露成一组机器可读的 MCP 工具：执行代码、载入数据、查看数据、读结构化结果、导出图、后台长任务与中断、数据预览、命令帮助。
+It runs pystata (Stata 17+) in an isolated worker process per session and exposes Stata as machine-readable MCP tools: run code, load data, inspect data, read structured results, export graphs, manage sessions, and execute interruptible background jobs.
+它为每个 session 启动独立的 pystata worker 进程，把 Stata 暴露成一组机器可读的 MCP 工具：执行代码、载入数据、查看数据、读结构化结果、导出图、管理会话，以及运行可中断的后台任务。
 
-Built after a code-level review of the 4 mainstream open-source Stata MCP projects (tmonk/mcp-stata, SepineTam/mcp-for-stata, haoyu-haoyu/stata-ai-fusion, hanlulong/stata-mcp), to close their shared gaps. Passed 7 rounds of adversarial audit (167 tests).
-本仓库是在代码级调研 4 个主流开源 Stata MCP 之后自研的，用于补它们共同的缺口；历经 7 轮对抗式审计（167 个测试全绿）。
+Built after a code-level review of 4 open-source Stata MCP projects (tmonk/mcp-stata, SepineTam/mcp-for-stata, haoyu-haoyu/stata-ai-fusion, hanlulong/stata-mcp), to close their shared gaps. Version 2 adds execution receipts, explicit session lifecycle controls, process-per-session parallelism, and declared Artifact outputs.
+本仓库是在代码级调研 4 个开源 Stata MCP 之后自研的，用于补它们共同的缺口。2.0 版新增执行回执、显式会话生命周期控制、每会话一进程的并行执行，以及声明式 Artifact 输出。
 
 ---
 
@@ -20,10 +20,12 @@ Built after a code-level review of the 4 mainstream open-source Stata MCP projec
 | **Universal structured results** — any e-class estimation command (`regress`/`logit`/`xtreg`/`mixed`/…) auto-yields regression JSON (`coefs`, se/t/p/ci, N, r2, full e()-scalars). No command-name enumeration. | **通用结构化结果**——任意估计命令自动产出回归 JSON（系数/se/t/p/ci、N、r2、全量 e() 标量），无需枚举命令名。 |
 | **Session isolation + self-healing** — each session is a worker subprocess; lazy start, idle reclamation, crash auto-rebuild, Windows Job Object kills orphans on parent death (no license leak). | **会话隔离 + 自愈**——每会话一个 worker 子进程；懒启动、空闲回收、崩溃自动重建；父进程死亡时 Windows Job Object 自动清理孤儿进程（防 license 泄漏）。 |
 | **Provenance / reproducibility** — every result carries `command_hash`, `data_signature`, `exec_seq` and a runnable `do_file`. | **来源追溯 / 可复现**——每个结果带 command_hash、数据指纹、执行序号和可复现的 do_file。 |
+| **Versioned execution receipts** — every completed execution reports executor/session identity, worker generation, execution/raw/structured status, runtime environment and supervision proof. | **版本化执行回执**——每次完成的执行都返回执行器/会话身份、worker generation、执行/原始输出/结构化结果状态、运行环境与监管证明。 |
+| **Declared Artifact outputs** — callers declare expected relative output paths; MCP waits for file settle and reports captured or missing outputs without re-running Stata. | **声明式 Artifact 输出**——调用方声明预期相对路径；MCP 等待文件稳定后报告已捕获或缺失的输出，不重跑 Stata。 |
 | **Command journal + replay** — session keeps a command log; on crash/reset it returns the history so an agent can rebuild state. | **命令日志 + 重放**——会话保留命令日志；崩溃/重置时随结果返回历史，供 agent 重建状态。 |
 | **Rich error object** — unified `error` (command_failed / timeout / crashed / start_failed), rc, error_class, session_reset, replay. | **统一错误对象**——error（command_failed/timeout/crashed/start_failed）+ rc + error_class + session_reset + replay。 |
-| **Background tasks** — submit a long command, poll status, interrupt; per-session routing; bounded table (TTL/caps). | **后台任务**——提交长命令、轮询状态、可中断；按会话路由；任务表有界（TTL/上限）。 |
-| **Multi-session routing** — real `session_id` end-to-end (schema → resolver → background), strict validation (no silent fallback). | **多会话路由**——session_id 端到端贯通（schema→解析→后台），严格校验（非法不再静默回退）。 |
+| **Background tasks** — submit a long command, poll status, interrupt; the exact resolved session is retained for execution and receipt generation; bounded task table (TTL/caps). | **后台任务**——提交长命令、轮询状态、可中断；执行与回执始终使用已经解析的同一 session；任务表有界（TTL/上限）。 |
+| **Parallel isolated sessions** — `session_id` routes end-to-end; commands in one session serialize, while different sessions can execute concurrently in distinct Stata workers. | **隔离并行会话**——session_id 端到端路由；同一 session 内命令串行，不同 session 使用独立 Stata worker 并行执行。 |
 | **Security** — variable-name whitelist, path auditor (fail-closed), restricted mode, DNS-aware SSRF guard on URLs. | **安全**——变量名白名单、路径审计（fail-closed）、受限模式、URL 的 DNS-aware SSRF 守卫。 |
 | **Graphs back to agent** — exported images returned as base64 `ImageContent` (multimodal agent sees them). | **图直接给 agent**——导出图片以 base64 ImageContent 返回（多模态 agent 能直接看到）。 |
 | **Chinese-Windows tuned** — UTF-8 primary with GBK fallback, forward-slash Stata paths, Chinese filenames tested. | **中文 Windows 适配**——UTF-8 主路 + GBK 回退、Stata 正斜杠路径、中文文件名实测。 |
@@ -82,11 +84,11 @@ claude mcp add stata-mcp -- python -m stata_mcp.server
 ```
 或 `.mcp.json` 的 stdio 配置（见仓库 `config` 示例）。Most tools accept `session_id` to target a session.
 
-## 8. Tools / 工具（10）
+## 8. Tools / 工具（14）
 
 | Tool | 说明 |
 |---|---|
-| `stata_run(code, background?, restricted?, session_id?)` | 执行代码；自动附结构化回归 JSON + provenance；后台执行返回 job_id |
+| `stata_run(code, background?, restricted?, session_id?, timeout_seconds?, operation_attempt_id?, artifact_outputs?)` | 执行代码；返回结构化结果、provenance 与 execution receipt；可声明 Artifact 输出；后台执行返回 job_id |
 | `stata_load_data(source, clear?, session_id?)` | 载入 dta/csv/xlsx（路径审计，限授权目录）|
 | `stata_inspect_data(action, variables?, session_id?)` | describe/summarize/codebook（变量名白名单）|
 | `stata_get_results(session_id?)` | 读 e()/r() 结构化 + 数据形状 |
@@ -94,8 +96,12 @@ claude mcp add stata-mcp -- python -m stata_mcp.server
 | `stata_export_graph(format, name?, filename?, session_id?)` | 导出图，base64 ImageContent 直接回给 agent |
 | `stata_get_help(topic, session_id?)` | 查 Stata 官方帮助（.sthlp）|
 | `stata_session_history(last?, session_id?)` | 会话命令日志（重放原料）|
+| `stata_executor_capabilities()` | 返回版本化的执行器隔离、并发和容量能力，不启动 Stata |
+| `stata_session_open(session_id, working_directory?)` | 显式创建 session，并将其不可变绑定到 host 下的工作目录 |
+| `stata_session_status(session_id)` | 只读查询 session 的最后可观测生命周期状态，不隐式创建 session |
+| `stata_session_close(session_id, reason?)` | 幂等关闭指定 session 及 worker tree，不影响其他 session |
 | `stata_break(session_id?)` | 打断指定会话当前命令 |
-| `stata_task_status(job_id)` | 后台任务状态/结果（全局 job 查询）|
+| `stata_task_status(job_id)` | 后台任务状态/结果；完成后返回同一套 execution receipt 与 Artifact 捕获状态 |
 
 ## 9. Structured result example / 结构化结果示例
 
@@ -112,22 +118,24 @@ claude mcp add stata-mcp -- python -m stata_mcp.server
 
 ```
 server.py        MCP stdio；make_context() 装配；审计日志
+contract.py      版本化 Envelope / execution receipt / session control 合同与校验
 session.py       Session（懒启动 worker 代理）+ SessionManager（上限/回收/自愈/Job Object）+ 命令日志
 stata/worker.py  worker 子进程（引擎+执行+结构化+break 线程+孤儿看门狗+ready 握手）
 results/         通用系数提取 + 会话快照 + 数据预览（sfi 直读 + Mata 统计量）
 guard/           L1 白名单 + L3 路径审计 + restricted（命令白名单注入拦截器）
 platform/job.py  Windows Job Object（父死子亡）
-tools/           10 个工具 @register；tasks.py 后台任务表（有界）
+tools/           14 个工具 @register；tasks.py 后台任务表（有界）
 ```
 抽象可插拔：ExecutionBackend / Tool / ResultParser。详见 `ARCHITECTURE.md`、`DESIGN.md`（含全部踩坑与每轮审计记录）。
 
 ## 11. Testing / 测试
 
 ```bash
-python -m unittest discover -s tests -t .   # 167 用例（mock + 真引擎回归；无 Stata 也跑 mock）
-python -m unittest tests.test_real_stata -v # 真引擎正确性：比对我们结构化提取 vs Stata 官方数值
+uv sync --dev
+uv run pytest -q
+uv run pytest tests/test_real_stata.py -v  # 真引擎正确性：比对结构化提取与 Stata 官方数值
 ```
-7 轮对抗式审计 + 每轮回归锁死，过程记在 `DESIGN.md`（§27a–27h）。
+测试覆盖 mock 合同、并发/会话隔离、执行回执、Artifact settle、worker 环境与真 Stata 回归。真引擎用例需要本机 Stata license；其余测试不启动 Stata。
 
 ## 12. Known boundaries / 已知边界（诚实声明）
 

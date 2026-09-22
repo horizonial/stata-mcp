@@ -47,7 +47,14 @@ class TaskRunner:
         self._tasks: dict[str, dict] = {}
         self._lock = threading.Lock()
 
-    def submit(self, code: str, session_id: str | None = None) -> str:
+    def submit(
+        self,
+        code: str,
+        session_id: str | None = None,
+        timeout: float | None = None,
+        metadata: dict | None = None,
+        session=None,
+    ) -> str:
         """提交后台执行，返回 job_id。session_id 缺省用 default（惰性解析）。
 
         P16e #3：prune + active/total 上限检查 + 登记 在**同一个锁域**内完成，
@@ -64,30 +71,41 @@ class TaskRunner:
                 raise TaskCapacityExceeded(
                     f"task table full ({_MAX_TOTAL}); retry after TTL cleanup"
                 )
-            if session_id is not None:
-                session = get_manager().get_or_create(session_id)
-            elif self._session is not None:
-                session = self._session
-            else:
-                session = get_manager().get_or_create("default")
+            selected_session = session
+            if selected_session is None and session_id is not None:
+                selected_session = get_manager().get_or_create(session_id)
+            elif selected_session is None and self._session is not None:
+                selected_session = self._session
+            elif selected_session is None:
+                selected_session = get_manager().get_or_create("default")
             job_id = uuid.uuid4().hex[:12]
             self._tasks[job_id] = {
-                "status": RUNNING, "result": None, "code": code, "session": session,
-                "submitted": time.time(),
+                "status": RUNNING,
+                "result": None,
+                "code": code,
+                "session": selected_session,
+                "submitted": time.time(), "timeout": timeout,
+                "metadata": dict(metadata or {}),
             }
         threading.Thread(
-            target=self._run, args=(job_id, code), daemon=True
+            target=self._run, args=(job_id, code, timeout), daemon=True
         ).start()
         return job_id
 
-    def _run(self, job_id: str, code: str) -> None:
+    def _run(self, job_id: str, code: str, timeout: float | None = None) -> None:
         session = self._tasks.get(job_id, {}).get("session", self._session)
         t0 = time.time()
         try:
-            result = session.execute(code)
+            result = (
+                session.execute(code)
+                if timeout is None
+                else session.execute(code, timeout=timeout)
+            )
             with self._lock:
                 self._tasks[job_id] = {
                     "status": DONE, "result": result, "code": code,
+                    "session": session,
+                    "metadata": dict(self._tasks[job_id].get("metadata") or {}),
                     "submitted": self._tasks[job_id].get("submitted", t0),
                     "finished": time.time(), "elapsed_ms": round((time.time() - t0) * 1000, 3),
                 }
@@ -97,6 +115,7 @@ class TaskRunner:
                     "status": ERROR,
                     "error": f"{type(exc).__name__}: {exc}",
                     "code": code,
+                    "metadata": dict(self._tasks[job_id].get("metadata") or {}),
                     "submitted": self._tasks[job_id].get("submitted", t0),
                     "finished": time.time(), "elapsed_ms": round((time.time() - t0) * 1000, 3),
                 }

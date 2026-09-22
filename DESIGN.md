@@ -490,3 +490,16 @@ restricted 维持"非沙箱"定性：仍只用于代码基本可信场景；对�
 （`saveold C:secret`/`C:\x`）由"直接文件动词首实参 / copy 双实参"捕获后，再经
 "无引号含冒号即拒"规则兜底。补 5 个回归：merge 1:1 / m:1 放行、cellrange 放行、
 merge using outside 仍拦、saveold C:secret 仍拦。README 测试数同步 162。
+
+## 28. v2.0 可核验并行执行合同（2026-09-22，206 tests）
+
+本轮把 MCP 从“能调用多会话”收口为可被上层 Agent 正式核验的执行器：
+
+1. **每 session 一进程，跨 session 真并行**：同一 session 继续串行；不同 session 使用独立 pystata worker、临时目录、Stata 内存和 generation。`stata_executor_capabilities` 公开版本化能力合同。
+2. **显式 session 生命周期**：新增 `stata_session_open/status/close`。open 将 session 不可变绑定到 host 下的工作目录；status 不隐式创建；close 幂等且只终止目标 worker tree。
+3. **版本化 execution receipt**：同步运行、后台完成、数据检查和图导出统一报告 executor/session identity、generation、execution/raw/structured status、环境快照与 supervision proof。模型输出不再是“工具确实成功”的唯一依据。
+4. **方法中立的 Stata 结果目录**：保留 e()/r() 的原生 locator、标量/矩阵/宏来源、估计样本 mask 与依赖环境；不把研究方法编码成有限 result profile 白名单。
+5. **声明式 Artifact 输出**：调用方提供安全相对路径和语义 slot；命令完成后仅观察文件存在与 settle 状态，不重跑 Stata。路径相对 session 已绑定工作目录解析，后台任务保留已经解析的同一 session。
+6. **失败与隐私边界**：PyStata 初始化不向 MCP 输出 license banner；超时、崩溃、命令失败和结构化解析失败分别编码，避免 rc=0 被误读为“所有产物完整”。
+
+真实验证包括：双持久会话同步 sleep 的墙钟并行、重复并行回归、独立物理 DTA 的大数据并行 profile，以及官方 Stata 数值对照。发布门禁为 `uv run pytest -q`，当前 206 tests 全绿。

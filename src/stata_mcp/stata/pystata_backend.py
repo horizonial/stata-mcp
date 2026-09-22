@@ -1,7 +1,8 @@
 """PystataBackend：进程内嵌 Stata 引擎的执行后端（D1/D3/D5 落地）。
 
 为什么这样写（均来自已验证 spike，不复刻未验证的写法）：
-- 点火：sys.path 插入 utilities 后 ``config.init(edition="mp")``（spike01）。
+- 点火：sys.path 插入 utilities 后以 ``splash=False`` 初始化；同时在进程采集边界
+  丢弃初始化 banner，避免许可证身份进入父进程 stdout/stderr。
 - 输出捕获：pystata 输出走 Python ``sys.stdout``，进程内用 ``io.StringIO`` 交换
   即可完整捕获（spike03 定案的 D3，不依赖文件日志 / log close _all）。
 - rc 捕获：``capture noisily ...`` 后 ``scalar _stata_mcp_rc = _rc`` 读全局
@@ -12,12 +13,64 @@
 """
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import io
 import sys
 import threading
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 
 from .. import config
 from .backend import ExecutionResult
+
+
+def _initialize_pystata(pystata_config) -> None:
+    """初始化 PyStata，但不允许许可证 banner 进入普通进程输出。
+
+    Stata 18 的 ``config.init`` 支持 ``splash=False``。保留旧签名回退是为了兼容
+    已有运行环境；所有分支仍置于 stdout/stderr 丢弃边界内，避免回退时重新泄漏。
+    初始化异常继续冒泡，只有 banner 被抑制。
+    """
+    sink = io.StringIO()
+    with redirect_stdout(sink), redirect_stderr(sink):
+        try:
+            pystata_config.init(edition="mp", splash=False)
+        except TypeError:
+            try:
+                pystata_config.init(edition="mp")
+            except TypeError:
+                pystata_config.init()
+
+
+def _ensure_sfi_importable(stata_home: str) -> None:
+    """Load Stata's own ``sfi.py`` when a frozen importer cannot discover it.
+
+    ``pystata.config.init`` adds ``ado/base/py`` to ``sys.path``.  Ordinary
+    CPython can import ``sfi`` from there, while a PyInstaller process may only
+    resolve modules present in its frozen graph.  The fallback loads exactly
+    the module below the configured Stata installation; it never searches an
+    arbitrary working directory or PYTHONPATH.
+    """
+    try:
+        importlib.import_module("sfi")
+        return
+    except ModuleNotFoundError as error:
+        if error.name != "sfi":
+            raise
+    source = Path(stata_home).resolve() / "ado" / "base" / "py" / "sfi.py"
+    if not source.is_file():
+        raise RuntimeError("configured Stata installation does not provide sfi.py")
+    spec = importlib.util.spec_from_file_location("sfi", source)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("configured Stata sfi.py cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["sfi"] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop("sfi", None)
+        raise
 
 
 class PystataBackend:
@@ -46,11 +99,9 @@ class PystataBackend:
 
         from pystata import config as _pystata_config
 
-        try:
-            _pystata_config.init(edition="mp")
-        except TypeError:
-            # 不同 pystata 版本的 init 签名略有差异，退化用默认
-            _pystata_config.init()
+        _initialize_pystata(_pystata_config)
+
+        _ensure_sfi_importable(config.stata_home())
 
         from pystata import stata
 
@@ -115,7 +166,11 @@ class PystataBackend:
             after = self._e_fingerprint()
 
         return ExecutionResult(
-            text=buf.getvalue(), rc=rc, e_changed=(before != after)
+            text=buf.getvalue(),
+            rc=rc,
+            e_changed=(
+                before != after or self._command_matches_estimation(code, after)
+            ),
         )
 
     def _e_fingerprint(self):
@@ -130,12 +185,43 @@ class PystataBackend:
 
             return (
                 Macro.getGlobal("e(cmd)"),
+                Macro.getGlobal("e(cmdline)"),
                 Macro.getGlobal("e(depvar)"),
                 Scalar.getValue("e(N)"),
                 Scalar.getValue("e(df_r)"),
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _command_matches_estimation(code: str, fingerprint) -> bool:
+        """Recognize a freshly repeated estimation command.
+
+        Comparing e() before/after misses a repeated identical regression because every stored
+        value can be equal.  Stata's e(cmdline) records the command that produced the current
+        estimates, so an exact normalized source line match proves that this invocation did run
+        that estimator.  A later non-estimation command does not match and therefore cannot
+        accidentally re-export stale e().
+        """
+
+        if not fingerprint or len(fingerprint) < 2:
+            return False
+        cmdline = fingerprint[1]
+        if not isinstance(cmdline, str) or not cmdline.strip():
+            return False
+
+        def normalized(value: str) -> str:
+            return " ".join(value.strip().lower().split())
+
+        expected = normalized(cmdline)
+        for raw_line in code.splitlines():
+            line = normalized(raw_line)
+            for prefix in ("quietly ", "noisily ", "capture "):
+                while line.startswith(prefix):
+                    line = line[len(prefix) :].lstrip()
+            if line == expected:
+                return True
+        return False
 
     # ---- 中断（P5b） ----------------------------------------------------------
 

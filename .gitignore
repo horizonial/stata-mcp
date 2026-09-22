@@ -17,3 +17,5 @@ _mcp_graphs/
 # 临时
 *.log
 spikes/__pycache__/
+.belief_map.sexp
+.belief_map_cache.json

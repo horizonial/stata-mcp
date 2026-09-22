@@ -26,6 +26,75 @@ import sys
 import threading
 import time
 
+_RUNTIME_PROBE_ATTEMPTS = 3
+_RUNTIME_PROBE_DELAY_SECONDS = 0.05
+
+
+class RuntimeEnvironmentProbeError(RuntimeError):
+    """Raised when the worker cannot prove its required Stata environment."""
+
+
+def _probe_runtime_value(
+    backend,
+    *,
+    key: str,
+    expression: str,
+    attempts: int = _RUNTIME_PROBE_ATTEMPTS,
+) -> str:
+    """Read one required Stata runtime fact with a small bounded retry.
+
+    PyStata occasionally returns an empty capture for the first command after
+    engine initialization.  An empty value is not evidence of a supported
+    runtime, so the worker retries locally and fails closed before announcing
+    ``ready`` if the fact still cannot be observed.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be positive")
+    last_observation = "no observation"
+    for attempt in range(1, attempts + 1):
+        try:
+            result = backend.execute(f"display {expression}")
+            lines = [line.strip() for line in result.text.splitlines() if line.strip()]
+            if result.rc == 0 and lines:
+                return lines[-1]
+            last_observation = f"rc={result.rc}, output={'present' if lines else 'empty'}"
+        except Exception as exc:  # noqa: BLE001 - backend/engine faults are retryable here
+            last_observation = f"exception={type(exc).__name__}"
+        if attempt < attempts:
+            time.sleep(_RUNTIME_PROBE_DELAY_SECONDS)
+    raise RuntimeEnvironmentProbeError(
+        f"required runtime fact {key!r} unavailable after {attempts} attempts "
+        f"({last_observation})"
+    )
+
+
+def _runtime_environment(backend) -> dict:
+    """Collect the required, non-credential runtime identity before ready."""
+    import platform
+
+    from .. import __version__
+
+    out = {
+        "stata_mcp_version": __version__,
+        "backend": "pystata",
+        "python_version": platform.python_version(),
+        "os": platform.system(),
+        "machine": platform.machine(),
+    }
+    for key, expression in (
+        ("stata_version", "c(stata_version)"),
+        ("stata_flavor", "c(flavor)"),
+        ("stata_os", "c(os)"),
+        ("stata_mp", "c(MP)"),
+    ):
+        out[key] = _probe_runtime_value(
+            backend,
+            key=key,
+            expression=expression,
+        )
+    out["stata_is_mp"] = out["stata_mp"] == "1"
+    return out
+
 
 def _parent_alive(pid: int) -> bool:
     """Windows 上检测 pid 进程是否存活（OpenProcess + CloseHandle）。
@@ -56,13 +125,71 @@ def _parent_watchdog(parent_pid: int, interval: float = 2.0) -> None:
 
 
 def _data_signature(backend) -> str | None:
-    """读当前数据集的 datasignature（确定性指纹，用于结果溯源到数据版本）。"""
+    """读当前数据集的 datasignature，同时保持用户命令留下的 r()。
+
+    ``datasignature`` 本身会覆盖 r()。若 MCP 直接执行它，用户随后引用
+    ``r(mean)`` 等值时会得到错误状态，破坏 Stata 会话保真。这里使用 Stata
+    自带的 ``_return hold/restore`` 在一个局部执行块内保存并恢复完整 r()。
+    """
+    code = (
+        "tempname __stata_mcp_rhold\n"
+        "_return hold `__stata_mcp_rhold'\n"
+        "datasignature\n"
+        "_return restore `__stata_mcp_rhold'"
+    )
+    # PyStata occasionally returns an empty internal-command capture even though the user's
+    # preceding command succeeded.  A bounded retry is safe because every attempt holds and
+    # restores r(), and it prevents a successful data load from losing its provenance token.
+    for _attempt in range(3):
+        try:
+            r = backend.execute(code)
+            if r.rc != 0:
+                continue
+            lines = [line.strip() for line in r.text.splitlines() if line.strip()]
+            # _return restore 在部分 Stata/PyStata 组合会额外打印一个 ``.``；
+            # datasignature 本体含 ``:``，优先选择它而不是盲取最后一行。
+            for line in reversed(lines):
+                candidate = line.strip().strip('"')
+                if candidate != "." and ":" in candidate:
+                    return candidate
+        except Exception:
+            continue
+    return None
+
+
+def parse_execution_result(backend, execution_result, parse_fn=None) -> tuple[dict | None, str]:
+    """Worker 的唯一解析状态转换；允许测试在 parser 边界注入故障。"""
+    if execution_result.rc != 0 or not execution_result.e_changed:
+        return None, "not_applicable"
+    if parse_fn is None:
+        from ..results.parser import try_parse
+
+        parse_fn = try_parse
     try:
-        r = backend.execute("datasignature")
-        lines = [l.strip() for l in r.text.splitlines() if l.strip()]
-        return lines[-1] if lines else None
+        structured = parse_fn(backend)
     except Exception:
-        return None
+        return None, "parse_failed"
+    if structured is None:
+        return None, "parse_failed"
+    return structured, "complete"
+
+
+def capture_return_state(backend, execution_result) -> dict:
+    """在任何内部命令覆盖 r() 之前捕获本次命令的 return state。
+
+    ``_data_signature`` 会执行 ``datasignature`` 并改写 r()。因此 r-class 结果
+    不能等到主进程随后发 snapshot 才读取，必须在 worker 的同一次 execute
+    响应内捕获。这里只返回结构化 r()，不把内部 ``return list`` 计作用户命令。
+    """
+    if execution_result.rc != 0:
+        return {}
+    try:
+        from ..results.parser import _parse_return_list
+
+        listed = backend.execute("return list")
+        return _parse_return_list(listed.text)
+    except Exception:
+        return {}
 
 
 # 载入数据类命令：出现即视为"换了一个数据集源"（P0-4 do-file 往返的载入前缀）。
@@ -84,7 +211,26 @@ def _is_clearer(code: str) -> bool:
     return first in _CLEARERS
 
 
-def worker_main(request_q, response_q, break_q, parent_pid: int | None = None) -> None:
+def _configure_worker_temp_directory(worker_temp_directory: str | None) -> None:
+    """Bind Stata and Python temporary files to this worker's private scope."""
+    if worker_temp_directory is None:
+        return
+    path = os.path.abspath(worker_temp_directory)
+    os.makedirs(path, exist_ok=True)
+    # STATATMP is Stata's documented override and takes precedence over the
+    # ordinary operating-system temporary-directory variables.
+    os.environ["STATATMP"] = path
+    os.environ["TEMP"] = path
+    os.environ["TMP"] = path
+
+
+def worker_main(
+    request_q,
+    response_q,
+    break_q,
+    parent_pid: int | None = None,
+    worker_temp_directory: str | None = None,
+) -> None:
     """worker 入口：init pystata，循环处理命令。
 
     除执行外，跟踪会话级溯源状态（P0-4）：
@@ -93,17 +239,20 @@ def worker_main(request_q, response_q, break_q, parent_pid: int | None = None) -
 
     ``parent_pid``：主进程 PID，用于孤儿看门狗（P14）——主进程死则本 worker 自退。
     """
-    from .pystata_backend import PystataBackend
-    from ..results.parser import try_parse
+    _configure_worker_temp_directory(worker_temp_directory)
 
+    from .pystata_backend import PystataBackend
     backend = PystataBackend()
     backend.init()
+    runtime_environment = _runtime_environment(backend)
     _data_load_cmd: str | None = None
     _exec_seq = 0
 
     # 启动握手（P16 #3）：引擎 init 完成即发 ready。init 抛异常 → 本进程退出、
     # 永不发 ready → Session 端短超时判"启动失败"，不再干等 300s。
-    response_q.put({"id": 0, "type": "ready"})
+    response_q.put(
+        {"id": 0, "type": "ready", "runtime_environment": runtime_environment}
+    )
 
     if parent_pid:
         if os.environ.get("STATAMCP_DEBUG"):
@@ -131,12 +280,8 @@ def worker_main(request_q, response_q, break_q, parent_pid: int | None = None) -
             code = msg["code"]
             r = backend.execute(code)
             _exec_seq += 1
-            structured = None
-            if r.rc == 0 and r.e_changed:
-                try:
-                    structured = try_parse(backend)
-                except Exception:
-                    structured = None
+            return_state = capture_return_state(backend, r)
+            structured, structured_result_status = parse_execution_result(backend, r)
             # 追踪数据源（do-file 往返）：载入命令记下，clear 清掉。
             if r.rc == 0:
                 if _is_clearer(code):
@@ -150,6 +295,8 @@ def worker_main(request_q, response_q, break_q, parent_pid: int | None = None) -
                     "rc": r.rc,
                     "e_changed": r.e_changed,
                     "structured": structured,
+                    "structured_result_status": structured_result_status,
+                    "return_state": return_state,
                     # 溯源元数据：命令哈希 + 数据指纹 + 数据源命令 + 执行序号
                     "command_hash": hashlib.sha256(code.encode("utf-8")).hexdigest()[:16],
                     "data_signature": _data_signature(backend),

@@ -55,4 +55,5 @@ import pkgutil as _pkgutil
 
 for _mod in _pkgutil.iter_modules(__path__):
     _importlib.import_module(f"{__name__}.{_mod.name}")
-del _mod, _importlib, _pkgutil
+globals().pop("_mod", None)
+del _importlib, _pkgutil

@@ -1,7 +1,6 @@
-# stata-mcp 整体架构策划（v1.0，开发基准）
+# stata-mcp 整体架构（v2.0）
 
-> 本文档是唯一的架构基准。后续所有 haiku 子 agent 的委派说明，都引用本文档的模块/接口编号，防止各写各的。
-> 分工：pro 负责策划 + review + 实测；haiku 负责按委派实现。
+> §2–§4 保留了项目早期调研与设计背景；发生冲突时，以本页的 v2.0 当前状态、公开工具 schema 和 `contract.py` 中的版本化合同为准。
 
 ---
 
@@ -57,12 +56,14 @@
 | # | 决策 | 依据 |
 |---|---|---|
 | D1 | 默认驱动 pystata 内嵌，抽象 `ExecutionBackend` | 保状态 + 读写 Stata 内存；可切批处理/R |
-| D2 | 会话 MVP 单进程 → 二期按需拆 worker 子进程 | 隔离是优点但不提前付复杂度 |
+| D2 | 每个 session 一个 pystata worker 子进程；同 session 串行、不同 session 可并行 | 隔离 stdout、Stata 内存与故障域；真实双会话和大数据实验验证 |
 | D3 | **输出捕获 = 进程内 sys.stdout 交换**（按调用、串行锁） | **实测（spike03）**：pystata 输出走 sys.stdout，进程内完整捕获；绕开文件锁/log close _all |
 | D4 | 编码探测链 UTF-8→GBK→latin-1 | **实测（spike02）**：Stata 18 text log 是 UTF-8，GBK 作老文件回退 |
 | D5 | rc 用**全局 scalar** 捕获 | **实测（spike02）**：rc=111 稳定拿到；避开 mcp-stata 的 local 作用域 bug |
 | D6 | 传输 stdio 起步，工具层与传输解耦 | 简单够用；需要时加 HTTP |
-| D7 | 返回信封 `Envelope`（见 §6.2） | 统一 text/structured/rc/error_class/graphs |
+| D7 | 返回版本化 `Envelope` + `execution_receipt`（见 §6.2） | 把执行状态、worker 身份、环境和结构化结果状态交给上层核验 |
+| D9 | session 工作目录首次绑定后不可变 | Workspace 文件边界不能随单次命令漂移 |
+| D10 | Artifact 输出先声明、后观察 settle，不由 MCP 自动重跑 | 区分外部执行与文件产物确认，避免重复副作用 |
 | D8 | 安全审计分层可插拔（§4） | 吸收 mcp-for-stata + 修 bug |
 
 ---
@@ -103,9 +104,9 @@
 |---|---|---|
 | `ExecutionBackend` | R / SAS / 批处理 Stata / 远程 | PystataBackend |
 | `Transport` | HTTP/SSE、多客户端 | stdio |
-| `SessionManager` | 多 worker、多用户、配额 | 单进程 |
-| `Tool` + registry | 任意新工具 | run |
-| `ResultParser` + registry | 任意命令的结果 schema | （P3 起）reg |
+| `SessionManager` | 多用户、动态配额 | 多 session / 每 session 独立 worker / 容量上限 |
+| `Tool` + registry | 任意新工具 | 14 个公开工具自动注册 |
+| `ResultParser` + registry | 任意 Stata 方法 | 通用 e()/r() 结果目录，不按方法白名单限制 |
 | `Guard` + chain | 新审计规则、不同后端不同规则 | L1–L4 |
 | `Encoder` | 任意编码 | UTF-8→GBK→latin-1 |
 | `OutputSink` | 流式、截断、转文件 | 内存缓冲 + 截断 |
@@ -130,12 +131,15 @@ class ExecutionBackend(Protocol):
 ```python
 @dataclass
 class Envelope:
+    schema_version: str
     text: str                      # 清洗后文本
     structured: dict | None        # 结构化结果（P3）
     rc: int
     error_class: str | None        # "syntax"|"sample"|"convergence"|"not_found"|None
     graphs: list[str]              # 图路径
     meta: dict                     # 耗时、截断标记等
+    error: dict | None
+    execution_receipt: dict | None # 版本化执行身份与状态合同
 ```
 
 ### 6.3 Tool + registry

@@ -33,7 +33,6 @@ def make_context() -> SimpleNamespace:
     max_sessions=1 时任何显式 ideaA 都被占位的 default 挡掉）。会话在真正用时
     才 get_or_create（首次 execute/snapshot 才点火占 license）。
     """
-    from .config import get_security, load_config
     from .session import get_manager
 
     manager = get_manager()
@@ -88,6 +87,9 @@ async def _call_tool(req_ctx, params: types.CallToolRequestParams) -> types.Call
     # scalars/error_class/graphs 全丢弃了，agent 通过 MCP 拿不到结构化结果）。
     # error_class 也拼进 meta 一并暴露，便于 agent 判断错误类型。
     meta = dict(envelope.meta or {})
+    meta["envelope_schema_version"] = envelope.schema_version
+    if envelope.execution_receipt is not None:
+        meta["execution_receipt"] = envelope.execution_receipt
     if envelope.error_class is not None:
         meta["error_class"] = envelope.error_class
     if envelope.graphs:

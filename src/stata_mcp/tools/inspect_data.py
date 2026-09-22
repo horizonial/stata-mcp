@@ -20,7 +20,12 @@ from ..envelope import Envelope
 from ..guard.validate import validate_varname
 from ..output.smcl import strip_smcl
 from . import register
-from .run import _resolve_backend, _session_arg, invalid_session_result
+from .run import (
+    _resolve_backend,
+    _session_arg,
+    build_execution_receipt,
+    invalid_session_result,
+)
 
 _ACTIONS = ("describe", "summarize", "codebook")
 
@@ -158,10 +163,18 @@ def stata_inspect_data(arguments: dict, ctx=None) -> Envelope:
     structured: dict | None = None
     if result.rc == 0:
         try:
-            snap = session.snapshot()  # worker 内读 r()/variables/shape
             if action == "summarize":
-                structured = _summarize_structured(snap, varlist)
+                # r() 会被 worker 的 datasignature 内部命令覆盖，必须使用与本次
+                # execute 同响应返回的原子 return_state，不能事后 snapshot。
+                return_state = getattr(result, "return_state", None)
+                if return_state is None:
+                    # 兼容自定义/旧 backend；正式 worker 总会显式返回 dict。
+                    return_state = session.snapshot()
+                structured = _summarize_structured(
+                    return_state, varlist
+                )
             elif action == "describe":
+                snap = session.snapshot()  # worker 内读 variables
                 structured = _describe_structured(snap, varlist)
             # codebook：无稳定结构化 → None
         except Exception:
@@ -173,6 +186,17 @@ def stata_inspect_data(arguments: dict, ctx=None) -> Envelope:
 
         error_class = classify_error(result.rc, text)
 
+    if result.rc != 0 or action == "codebook" or len(varlist) != 1 and action == "summarize":
+        structured_status = "not_applicable"
+    else:
+        structured_status = "complete" if structured is not None else "parse_failed"
+    execution_receipt = build_execution_receipt(
+        session,
+        result,
+        truncated=False,
+        structured_result_status=structured_status,
+    )
+
     return Envelope(
         text=text,
         structured=structured,
@@ -180,4 +204,5 @@ def stata_inspect_data(arguments: dict, ctx=None) -> Envelope:
         error_class=error_class,
         graphs=[],
         meta=meta,
+        execution_receipt=execution_receipt,
     )
